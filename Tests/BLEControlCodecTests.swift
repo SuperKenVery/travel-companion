@@ -4,7 +4,7 @@ import XCTest
 
 final class BLEControlCodecTests: XCTestCase {
     func testEncryptedFragmentedRoundTrip() throws {
-        let codec = BLEControlCodec()
+        let codec = BLEControlCodec(keyData: try NearbyGroupCredentials.derive(fromPIN: "123456").keyData)
         let original = ControlMessage(
             senderID: UUID(),
             sequence: 7,
@@ -24,11 +24,32 @@ final class BLEControlCodecTests: XCTestCase {
     }
 
     func testTamperFailsAuthentication() throws {
-        let codec = BLEControlCodec()
+        let codec = BLEControlCodec(keyData: try NearbyGroupCredentials.derive(fromPIN: "123456").keyData)
         let message = ControlMessage(senderID: UUID(), sequence: 1, kind: .ack(messageID: UUID()))
         var encrypted = try codec.encode(message)
         encrypted[encrypted.index(before: encrypted.endIndex)] ^= 0x01
         XCTAssertThrowsError(try codec.decode(encrypted))
     }
-}
 
+    func testSamePINDerivesSameGroupAndKey() throws {
+        let first = try NearbyGroupCredentials.derive(fromPIN: "042381")
+        let second = try NearbyGroupCredentials.derive(fromPIN: "042381")
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.id.count, 16)
+    }
+
+    func testPINMustContainExactlySixDigits() {
+        XCTAssertThrowsError(try NearbyGroupCredentials.derive(fromPIN: "12345"))
+        XCTAssertThrowsError(try NearbyGroupCredentials.derive(fromPIN: "12345a"))
+    }
+
+    func testGroupAuthenticationRejectsDifferentPIN() throws {
+        let member = try NearbyGroupCredentials.derive(fromPIN: "123456")
+        let outsider = try NearbyGroupCredentials.derive(fromPIN: "654321")
+        let payload = Data("bonjour-handshake".utf8)
+        let tag = member.authenticationTag(for: payload)
+
+        XCTAssertTrue(member.authenticates(tag, payload: payload))
+        XCTAssertFalse(outsider.authenticates(tag, payload: payload))
+    }
+}

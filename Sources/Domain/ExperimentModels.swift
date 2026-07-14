@@ -2,7 +2,7 @@ import Foundation
 
 enum ExperimentKind: String, Codable, CaseIterable, Sendable {
     case capability
-    case wifiAware
+    case peerToPeer
     case bluetooth
     case location
     case uwb
@@ -83,4 +83,3 @@ extension Duration {
         return (Double(parts.seconds) * 1_000) + (Double(parts.attoseconds) / 1e15)
     }
 }
-

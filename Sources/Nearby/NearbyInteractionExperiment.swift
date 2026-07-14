@@ -50,7 +50,30 @@ final class NearbyInteractionExperiment: NSObject {
             log(name: "session", phase: "begin", outcome: .failure, metadata: ["reason": "notForeground"])
             return
         }
+        if let existing = contextsByPeer[peerID], existing.requestID == requestID {
+            log(
+                name: "session",
+                phase: "beginReused",
+                outcome: .info,
+                metadata: [
+                    "peerID": peerID.uuidString,
+                    "requestID": requestID.uuidString,
+                    "reason": "sameRequestAlreadyActive"
+                ]
+            )
+            return
+        }
         if let old = contextsByPeer.removeValue(forKey: peerID) {
+            log(
+                name: "session",
+                phase: "replace",
+                outcome: .info,
+                metadata: [
+                    "peerID": peerID.uuidString,
+                    "oldRequestID": old.requestID.uuidString,
+                    "newRequestID": requestID.uuidString
+                ]
+            )
             peerBySession.removeValue(forKey: ObjectIdentifier(old.session))
             old.session.invalidate()
         }
@@ -79,10 +102,23 @@ final class NearbyInteractionExperiment: NSObject {
             log(name: "token", phase: "receive", outcome: .failure, metadata: ["reason": "notForeground"])
             return
         }
-        if contextsByPeer[peerID] == nil {
+        if contextsByPeer[peerID]?.requestID != requestID {
             begin(peerID: peerID, requestID: requestID)
         }
-        guard var context = contextsByPeer[peerID] else { return }
+        guard var context = contextsByPeer[peerID], context.requestID == requestID else {
+            log(
+                name: "token",
+                phase: "receive",
+                outcome: .failure,
+                byteCount: data.count,
+                metadata: [
+                    "peerID": peerID.uuidString,
+                    "requestID": requestID.uuidString,
+                    "reason": "requestContextUnavailable"
+                ]
+            )
+            return
+        }
         do {
             guard let token = try NSKeyedUnarchiver.unarchivedObject(ofClass: NIDiscoveryToken.self, from: data) else {
                 throw NearbyError.invalidToken
@@ -128,8 +164,9 @@ final class NearbyInteractionExperiment: NSObject {
         log(name: "session", phase: "stopAll", outcome: .success, metadata: ["reason": reason, "sessions": String(count)])
     }
 
-    private func peerID(for session: NISession) -> UUID? {
-        peerBySession[ObjectIdentifier(session)]
+    private func context(for session: NISession) -> Context? {
+        guard let peerID = peerBySession[ObjectIdentifier(session)] else { return nil }
+        return contextsByPeer[peerID]
     }
 
     private func log(
@@ -157,13 +194,15 @@ final class NearbyInteractionExperiment: NSObject {
 
 extension NearbyInteractionExperiment: @preconcurrency NISessionDelegate {
     func session(_ session: NISession, didUpdate nearbyObjects: [NINearbyObject]) {
-        guard let peerID = peerID(for: session), let object = nearbyObjects.first else { return }
+        guard let context = context(for: session), let object = nearbyObjects.first else { return }
+        let peerID = context.peerID
         latestPeerID = peerID
         latestDistance = object.distance
         latestDirection = object.direction
         state = "ranging"
         var metadata = [
             "peerID": peerID.uuidString,
+            "requestID": context.requestID.uuidString,
             "distanceMeters": object.distance.map { String(format: "%.3f", $0) } ?? "unavailable",
             "directionAvailable": String(object.direction != nil),
             "orientation": UIDevice.current.orientation.isLandscape ? "landscape" : "portrait"
@@ -177,33 +216,38 @@ extension NearbyInteractionExperiment: @preconcurrency NISessionDelegate {
     }
 
     func session(_ session: NISession, didRemove nearbyObjects: [NINearbyObject], reason: NINearbyObject.RemovalReason) {
-        guard let peerID = peerID(for: session) else { return }
+        guard let context = context(for: session) else { return }
+        let peerID = context.peerID
         latestDistance = nil
         latestDirection = nil
         state = "GPS fallback"
-        log(name: "measurement", phase: "removed", outcome: .failure, metadata: ["peerID": peerID.uuidString, "reason": String(describing: reason), "objects": String(nearbyObjects.count)])
+        log(name: "measurement", phase: "removed", outcome: .failure, metadata: ["peerID": peerID.uuidString, "requestID": context.requestID.uuidString, "reason": String(describing: reason), "objects": String(nearbyObjects.count)])
     }
 
     func sessionWasSuspended(_ session: NISession) {
-        guard let peerID = peerID(for: session) else { return }
+        guard let context = context(for: session) else { return }
+        let peerID = context.peerID
         latestDistance = nil
         latestDirection = nil
         state = "GPS fallback"
-        log(name: "session", phase: "suspended", outcome: .info, metadata: ["peerID": peerID.uuidString])
+        log(name: "session", phase: "suspended", outcome: .info, metadata: ["peerID": peerID.uuidString, "requestID": context.requestID.uuidString])
     }
 
     func sessionSuspensionEnded(_ session: NISession) {
-        guard let peerID = peerID(for: session),
+        guard let context = context(for: session) else { return }
+        let peerID = context.peerID
+        guard
               isForeground,
               let configuration = contextsByPeer[peerID]?.configuration
         else { return }
         session.run(configuration)
         state = "ranging resumed"
-        log(name: "session", phase: "resumed", outcome: .success, metadata: ["peerID": peerID.uuidString])
+        log(name: "session", phase: "resumed", outcome: .success, metadata: ["peerID": peerID.uuidString, "requestID": context.requestID.uuidString])
     }
 
     func session(_ session: NISession, didInvalidateWith error: Error) {
-        guard let peerID = peerID(for: session) else { return }
+        guard let context = context(for: session) else { return }
+        let peerID = context.peerID
         contextsByPeer.removeValue(forKey: peerID)
         peerBySession.removeValue(forKey: ObjectIdentifier(session))
         activeSessionCount = contextsByPeer.count
@@ -213,6 +257,14 @@ extension NearbyInteractionExperiment: @preconcurrency NISessionDelegate {
         if observedResourceLimit == nil, activeSessionCount > 0 {
             observedResourceLimit = activeSessionCount
         }
-        log(name: "session", phase: "invalidated", outcome: .failure, metadata: ["peerID": peerID.uuidString, "error": String(describing: error), "activeAfterInvalidation": String(activeSessionCount)])
+        let nsError = error as NSError
+        log(name: "session", phase: "invalidated", outcome: .failure, metadata: [
+            "peerID": peerID.uuidString,
+            "requestID": context.requestID.uuidString,
+            "error": String(describing: error),
+            "errorDomain": nsError.domain,
+            "errorCode": String(nsError.code),
+            "activeAfterInvalidation": String(activeSessionCount)
+        ])
     }
 }

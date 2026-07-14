@@ -20,8 +20,10 @@ final class BluetoothControlPlane: NSObject {
     private static let peripheralRestoreID = "travel.validation.bluetooth.peripheral"
 
     private let deviceID: UUID
+    private let displayName: String
     private let eventSink: EventSink
-    private let codec = BLEControlCodec()
+    private var codec: BLEControlCodec?
+    private(set) var groupCredentials: NearbyGroupCredentials?
     private var centralManager: CBCentralManager!
     private var peripheralManager: CBPeripheralManager!
     private var mutableCharacteristic: CBMutableCharacteristic?
@@ -33,8 +35,10 @@ final class BluetoothControlPlane: NSObject {
     private var seenMessageIDs: Set<UUID> = []
     private var sequence: UInt64
     private var benchmarkTask: Task<Void, Never>?
+    private var pairedMembers: [UUID: String] = [:]
 
     var onMessage: ((ControlMessage) -> Void)?
+    var onGroupChanged: ((NearbyGroupCredentials?) -> Void)?
     private(set) var centralState = "unknown"
     private(set) var peripheralState = "unknown"
     private(set) var connectedPeerCount = 0
@@ -43,9 +47,16 @@ final class BluetoothControlPlane: NSObject {
     private(set) var restorationCount = 0
     private(set) var isRunning = false
 
-    init(deviceID: UUID, eventSink: @escaping EventSink) {
+    var groupID: String? { groupCredentials?.id }
+    var pairedMemberNames: [String] { pairedMembers.values.sorted() }
+
+    init(deviceID: UUID, displayName: String, eventSink: @escaping EventSink) {
         self.deviceID = deviceID
+        self.displayName = displayName
         self.eventSink = eventSink
+        let storedCredentials = NearbyGroupCredentials.load()
+        groupCredentials = storedCredentials
+        codec = storedCredentials.map { BLEControlCodec(keyData: $0.keyData) }
         sequence = UInt64(UserDefaults.standard.integer(forKey: "bleSequence"))
         if let values = UserDefaults.standard.array(forKey: "bleSeenMessageIDs") as? [String] {
             seenMessageIDs = Set(values.compactMap(UUID.init(uuidString:)))
@@ -91,6 +102,32 @@ final class BluetoothControlPlane: NSObject {
         log(name: "lifecycle", phase: "stop", outcome: .success)
     }
 
+    func createGroup() throws -> String {
+        let pin = NearbyGroupCredentials.generatePIN()
+        try joinGroup(pin: pin)
+        return pin
+    }
+
+    func joinGroup(pin: String) throws {
+        let credentials = try NearbyGroupCredentials.derive(fromPIN: pin)
+        try credentials.save()
+        groupCredentials = credentials
+        codec = BLEControlCodec(keyData: credentials.keyData)
+        pairedMembers.removeAll()
+        onGroupChanged?(credentials)
+        log(name: "groupPairing", phase: "configured", outcome: .success, metadata: ["groupID": credentials.id])
+        announceGroupMembership()
+    }
+
+    func leaveGroup() {
+        NearbyGroupCredentials.clear()
+        groupCredentials = nil
+        codec = nil
+        pairedMembers.removeAll()
+        onGroupChanged?(nil)
+        log(name: "groupPairing", phase: "left", outcome: .success)
+    }
+
     @discardableResult
     func send(_ kind: ControlKind, ttl: TimeInterval = 30) -> ControlMessage {
         sequence &+= 1
@@ -133,6 +170,10 @@ final class BluetoothControlPlane: NSObject {
 
     private func transmit(_ message: ControlMessage) {
         do {
+            guard let codec else {
+                log(name: controlName(message.kind), phase: "send", outcome: .failure, metadata: ["reason": "groupPINRequired"])
+                return
+            }
             let encrypted = try codec.encode(message)
             let packets = codec.fragment(encrypted, messageID: message.id, maximumPacketSize: 140)
             for (id, characteristic) in writableCharacteristics {
@@ -170,6 +211,10 @@ final class BluetoothControlPlane: NSObject {
 
     private func ingest(_ packet: Data, source: String) {
         do {
+            guard let codec else {
+                log(name: "controlFrame", phase: "decode", outcome: .failure, metadata: ["source": source, "reason": "groupPINRequired"])
+                return
+            }
             let fragment = try codec.parse(packet)
             var assembly = assemblies[fragment.messageID] ?? BLEAssembly(total: fragment.total, createdAt: .now)
             assembly.chunks[Int(fragment.index)] = fragment.payload
@@ -197,6 +242,11 @@ final class BluetoothControlPlane: NSObject {
             if !isDuplicate {
                 remember(message.id)
                 receivedMessageCount += 1
+                if case let .groupHello(groupID, name) = message.kind,
+                   groupID == groupCredentials?.id,
+                   message.senderID != deviceID {
+                    pairedMembers[message.senderID] = name
+                }
                 bluetoothRuntimeLogger.notice(
                     "onMessage begin kind=\(name, privacy: .public) id=\(message.id.uuidString, privacy: .public)"
                 )
@@ -250,6 +300,11 @@ final class BluetoothControlPlane: NSObject {
         connectedPeerCount = Set(connectedPeripherals.keys).union(subscribedCentrals.keys).count
     }
 
+    private func announceGroupMembership() {
+        guard let groupID = groupCredentials?.id else { return }
+        _ = send(.groupHello(groupID: groupID, name: displayName), ttl: 120)
+    }
+
     private func log(
         name: String,
         phase: String,
@@ -272,6 +327,7 @@ final class BluetoothControlPlane: NSObject {
 
     private func controlName(_ kind: ControlKind) -> String {
         switch kind {
+        case .groupHello: "groupHello"
         case .dataAvailable: "dataAvailable"
         case .locationRequest: "locationRequest"
         case .locationResponse: "locationResponse"
@@ -306,7 +362,10 @@ extension BluetoothControlPlane: @preconcurrency CBCentralManagerDelegate {
     ) {
         connectedPeripherals[peripheral.identifier] = peripheral
         peripheral.delegate = self
-        central.connect(peripheral)
+        central.connect(
+            peripheral,
+            options: [CBConnectPeripheralOptionEnableAutoReconnect: true]
+        )
         log(name: "discovery", phase: "found", outcome: .success, metadata: ["peripheral": peripheral.identifier.uuidString, "rssi": RSSI.stringValue])
     }
 
@@ -363,6 +422,7 @@ extension BluetoothControlPlane: @preconcurrency CBPeripheralDelegate {
             peripheral.setNotifyValue(true, for: characteristic)
         }
         updatePeerCount()
+        announceGroupMembership()
         log(name: "gatt", phase: "ready", outcome: .success, metadata: ["peripheral": peripheral.identifier.uuidString])
     }
 
@@ -407,6 +467,7 @@ extension BluetoothControlPlane: @preconcurrency CBPeripheralManagerDelegate {
     func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         subscribedCentrals[central.identifier] = central
         updatePeerCount()
+        announceGroupMembership()
         log(name: "subscription", phase: "subscribed", outcome: .success, metadata: ["central": central.identifier.uuidString, "maximumUpdateLength": String(central.maximumUpdateValueLength)])
     }
 
@@ -462,10 +523,8 @@ struct BLEFragment {
 struct BLEControlCodec {
     private let key: SymmetricKey
 
-    init() {
-        // Debug-only shared laboratory key. Production group keys replace this vertical-slice key.
-        let material = Data("travel-companion-section-11-validation-key".utf8)
-        key = SymmetricKey(data: SHA256.hash(data: material))
+    init(keyData: Data) {
+        key = SymmetricKey(data: keyData)
     }
 
     func encode(_ message: ControlMessage) throws -> Data {

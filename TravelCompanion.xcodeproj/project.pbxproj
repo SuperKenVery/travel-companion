@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 77;
+	objectVersion = 63;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -12,7 +12,7 @@
 		1E36D937BFA8AE15FD1E2BFD /* TravelCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1927826632349A1582A03659 /* TravelCompanionApp.swift */; };
 		2968EADEBB60E616A05B07B9 /* ExperimentCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 356CAEA70D9F538A9AFAFAD8 /* ExperimentCoordinator.swift */; };
 		29B79F2FF3DD0D4B66B8C599 /* AudioCallEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F9D71CECCCD5C9A10C8F124 /* AudioCallEngine.swift */; };
-		2F58888EAE4943AC95C8834E /* WiFiAwareExperiment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */; };
+		2F58888EAE4943AC95C8834E /* PeerToPeerTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9FDBC527146E39828585F3 /* PeerToPeerTransport.swift */; };
 		3906CB1254B8C7874EA91F9D /* ValidationTLSConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */; };
 		3FD2B8DC6BE9A3D98E56B1D5 /* LocalNotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A539C1980A99C7D3CF9C5024 /* LocalNotificationManager.swift */; };
 		5D421AACFBA2D01CEFF4B0F4 /* PersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0564F7D9E5784E741A653F13 /* PersistenceTests.swift */; };
@@ -48,14 +48,14 @@
 		11EE34AC3F665ABEE0173DE1 /* OfflineCallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCallManager.swift; sourceTree = "<group>"; };
 		18A9E15E3BBFAF43F73168C0 /* TravelCompanionTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TravelCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1927826632349A1582A03659 /* TravelCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TravelCompanionApp.swift; sourceTree = "<group>"; };
-		1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiAwareExperiment.swift; sourceTree = "<group>"; };
+		1B9FDBC527146E39828585F3 /* PeerToPeerTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerToPeerTransport.swift; sourceTree = "<group>"; };
 		214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ValidationTLSConfiguration.swift; sourceTree = "<group>"; };
 		2314D4F720738D202B2C69CA /* ResourceTransferStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceTransferStore.swift; sourceTree = "<group>"; };
 		2E70E55421AB24AE2AB120A1 /* ExperimentLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentLogStore.swift; sourceTree = "<group>"; };
 		356CAEA70D9F538A9AFAFAD8 /* ExperimentCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentCoordinator.swift; sourceTree = "<group>"; };
 		561FA883EF2BC5A8B3F7A174 /* LocationExperimentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationExperimentEngine.swift; sourceTree = "<group>"; };
 		5C535BE62E4930F023E2F37E /* ExperimentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentModels.swift; sourceTree = "<group>"; };
-		660F4C444ECFE128677DA7F2 /* TravelCompanion.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TravelCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		660F4C444ECFE128677DA7F2 /* TravelCompanion.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TravelCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		69EA6584973714E430851337 /* PairingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingViews.swift; sourceTree = "<group>"; };
 		73C3327125A5CDCD76ED4274 /* BLEControlCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEControlCodecTests.swift; sourceTree = "<group>"; };
 		7CE6A0A976C0A238AEEDD6D2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -133,7 +133,7 @@
 			children = (
 				81F7153937E9033C156648A9 /* BluetoothControlPlane.swift */,
 				214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */,
-				1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */,
+				1B9FDBC527146E39828585F3 /* PeerToPeerTransport.swift */,
 			);
 			path = Transport;
 			sourceTree = "<group>";
@@ -249,7 +249,6 @@
 			);
 			mainGroup = F8B89361BE22204F07EF412B;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -292,7 +291,7 @@
 				1E36D937BFA8AE15FD1E2BFD /* TravelCompanionApp.swift in Sources */,
 				72FA0D84911908C541995DAC /* ValidationEventStore.swift in Sources */,
 				3906CB1254B8C7874EA91F9D /* ValidationTLSConfiguration.swift in Sources */,
-				2F58888EAE4943AC95C8834E /* WiFiAwareExperiment.swift in Sources */,
+				2F58888EAE4943AC95C8834E /* PeerToPeerTransport.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -402,7 +401,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = Sources/App/TravelCompanion.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 2SY72R44WU;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = Sources/App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -411,6 +412,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidation;
 				PRODUCT_NAME = TravelCompanion;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = iphoneos;
 				TARGETED_DEVICE_FAMILY = 1;
@@ -491,7 +493,9 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_ENTITLEMENTS = Sources/App/TravelCompanion.entitlements;
-				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = 2SY72R44WU;
 				ENABLE_PREVIEWS = YES;
 				INFOPLIST_FILE = Sources/App/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -500,6 +504,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidation;
 				PRODUCT_NAME = TravelCompanion;
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;

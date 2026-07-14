@@ -7,7 +7,6 @@ import Network
 import Observation
 import OSLog
 import UIKit
-import WiFiAware
 
 private let coordinatorLogger = Logger(
     subsystem: "com.ken.TravelCompanionValidation",
@@ -28,7 +27,7 @@ final class ExperimentCoordinator {
     private let logStore: ExperimentLogStore
     private let eventStore: ValidationEventStore
     private let transferStore: ResourceTransferStore
-    private let wifi: WiFiAwareExperiment
+    private let transport: PeerToPeerTransport
     private var energyTask: Task<Void, Never>?
     private var pendingControlStarts: [UUID: ContinuousClock.Instant] = [:]
     private var precisionCooldowns: [UUID: Date] = [:]
@@ -43,17 +42,21 @@ final class ExperimentCoordinator {
     private(set) var pendingPrecisionRequests: [PendingPrecisionRequest] = []
     private(set) var dataConnectionCount = 0
     private(set) var voiceConnectionCount = 0
-    private(set) var wifiPairedDeviceNames: [String] = []
-    private(set) var wifiDataPublisherState = "未启动"
-    private(set) var wifiVoicePublisherState = "未启动"
-    private(set) var wifiDiscoveryState = "未启动"
-    private(set) var wifiConnectionState = "未连接"
-    private(set) var wifiLastError: String?
+    private(set) var bonjourDiscoveredMemberNames: [String] = []
+    private(set) var dataPublisherState = "未启动"
+    private(set) var voicePublisherState = "未启动"
+    private(set) var discoveryState = "未启动"
+    private(set) var connectionState = "未连接"
+    private(set) var transportLastError: String?
+    private(set) var createdGroupPIN: String?
+    private(set) var groupPairingError: String?
     private(set) var lastExportURL: URL?
     private(set) var lastError: String?
     private(set) var openedPrecisionRequestID: UUID?
     var selectedLocationStrategy: LocationExperimentStrategy = .hybrid
+    var selectedLiveConfiguration: LocationLiveConfigurationOption = .defaultActivity
     var isForeground = true
+    var groupID: String? { bluetooth.groupID }
 
     init() {
         let defaults = UserDefaults.standard
@@ -74,11 +77,11 @@ final class ExperimentCoordinator {
         self.logStore = logStore
         self.eventStore = eventStore
         self.transferStore = transferStore
-        bluetooth = BluetoothControlPlane(deviceID: deviceID, eventSink: sink)
+        bluetooth = BluetoothControlPlane(deviceID: deviceID, displayName: displayName, eventSink: sink)
         location = LocationExperimentEngine(eventSink: sink)
         nearby = NearbyInteractionExperiment(eventSink: sink)
         calls = OfflineCallManager(deviceID: deviceID, eventSink: sink)
-        wifi = WiFiAwareExperiment(
+        transport = PeerToPeerTransport(
             deviceID: deviceID,
             displayName: displayName,
             eventStore: eventStore,
@@ -127,7 +130,11 @@ final class ExperimentCoordinator {
         isLabRunning = true
         UserDefaults.standard.set(true, forKey: "validationLabActive")
         bluetooth.start()
-        Task { await wifi.start(); await updateConnectionCounts() }
+        Task {
+            await transport.configureGroup(bluetooth.groupCredentials)
+            await transport.start()
+            await updateConnectionCounts()
+        }
         startEnergySampling()
         let launchReason = UserDefaults.standard.string(forKey: "lastLaunchReason") ?? "unknown"
         append(
@@ -151,12 +158,13 @@ final class ExperimentCoordinator {
         if let callID = calls.activeCallID { calls.end(callID: callID) }
         energyTask?.cancel()
         energyTask = nil
-        Task { await wifi.stop(); await updateConnectionCounts(); await refreshDiagnostics() }
+        Task { await transport.stop(); await updateConnectionCounts(); await refreshDiagnostics() }
     }
 
     func setForeground(_ foreground: Bool) {
         coordinatorLogger.notice("scenePhase setForeground begin foreground=\(foreground)")
         isForeground = foreground
+        location.setAppForeground(foreground)
         nearby.setForeground(foreground)
         append(
             ExperimentRecord(
@@ -177,6 +185,14 @@ final class ExperimentCoordinator {
         location.stop()
     }
 
+    func startLocationFrequencyTest() {
+        location.startFrequencyTest(configuration: selectedLiveConfiguration)
+    }
+
+    func stopLocationFrequencyTest() {
+        location.stop()
+    }
+
     func requestLocation() {
         let message = bluetooth.send(
             .locationRequest(desiredFreshness: 15, deadline: .now.addingTimeInterval(8)),
@@ -187,7 +203,7 @@ final class ExperimentCoordinator {
 
     func sendTextAndHint() {
         Task {
-            let event = await wifi.publishText("验证消息 \(Date.now.formatted(date: .omitted, time: .standard))")
+            let event = await transport.publishText("验证消息 \(Date.now.formatted(date: .omitted, time: .standard))")
             _ = bluetooth.send(.dataAvailable(cursor: event.sequence), ttl: 60)
             await updateConnectionCounts()
             await refreshDiagnostics()
@@ -196,26 +212,43 @@ final class ExperimentCoordinator {
 
     func requestAntiEntropy() {
         Task {
-            let success = await wifi.requestSync()
+            let success = await transport.requestSync()
             if !success { await notifications.genericDataAvailableFailure() }
             await refreshDiagnostics()
         }
     }
 
     func sendPing() {
-        Task { await wifi.sendPing(); await updateConnectionCounts() }
+        Task { await transport.sendPing(); await updateConnectionCounts() }
     }
 
     func sendLargeFile(megabytes: Int = 5) {
-        Task { await wifi.sendResource(byteCount: megabytes * 1_024 * 1_024) }
+        Task { await transport.sendResource(byteCount: megabytes * 1_024 * 1_024) }
     }
 
-    func startWiFiPublishing() {
-        Task { await wifi.startPublishing() }
+    func createGroup() {
+        do {
+            createdGroupPIN = try bluetooth.createGroup()
+            groupPairingError = nil
+        } catch {
+            groupPairingError = error.localizedDescription
+        }
     }
 
-    func connectPickedEndpoint(_ endpoint: WAEndpoint) {
-        Task { await wifi.connectPickedEndpoint(endpoint); await updateConnectionCounts() }
+    func joinGroup(pin: String) {
+        do {
+            try bluetooth.joinGroup(pin: pin)
+            createdGroupPIN = nil
+            groupPairingError = nil
+        } catch {
+            groupPairingError = error.localizedDescription
+        }
+    }
+
+    func leaveGroup() {
+        createdGroupPIN = nil
+        groupPairingError = nil
+        bluetooth.leaveGroup()
     }
 
     func requestPrecisionLocation() {
@@ -237,6 +270,13 @@ final class ExperimentCoordinator {
             return
         }
         _ = bluetooth.send(.precisionLocateResponse(requestID: request.id, accepted: true, reason: nil))
+        append(ExperimentRecord(
+            kind: .uwb,
+            name: "precisionRequest",
+            phase: "acceptedLocally",
+            outcome: .success,
+            metadata: ["requestID": request.id.uuidString, "peerID": request.senderID.uuidString]
+        ))
         nearby.begin(peerID: request.senderID, requestID: request.id)
     }
 
@@ -248,7 +288,6 @@ final class ExperimentCoordinator {
     func startOutgoingCall() {
         let callID = UUID()
         let peerID = UUID.zero
-        _ = bluetooth.send(.callOffer(callID: callID, displayName: displayName), ttl: 30)
         calls.startOutgoing(callID: callID, peerID: peerID)
     }
 
@@ -292,8 +331,8 @@ final class ExperimentCoordinator {
             "hardware": machine,
             "systemName": UIDevice.current.systemName,
             "systemVersion": UIDevice.current.systemVersion,
-            "wifiAware": String(WACapabilities.supportedFeatures.contains(.wifiAware)),
-            "wifiAwareMaximumPeers": String(WACapabilities.maximumConnectableDevices),
+            "bonjourPeerToPeerIncluded": "true",
+            "nearbyGroupConfigured": String(groupID != nil),
             "uwbPreciseDistance": String(NISession.deviceCapabilities.supportsPreciseDistanceMeasurement),
             "uwbDirection": String(NISession.deviceCapabilities.supportsDirectionMeasurement),
             "bluetoothAuthorization": String(describing: CBManager.authorization),
@@ -312,9 +351,21 @@ final class ExperimentCoordinator {
             }
         }
         bluetooth.onMessage = { [weak self] message in self?.handleControl(message) }
+        bluetooth.onGroupChanged = { [weak self] credentials in
+            guard let self else { return }
+            Task { await self.transport.configureGroup(credentials) }
+        }
         nearby.onLocalToken = { [weak self] peerID, requestID, data in
             guard let self else { return }
-            Task { await self.wifi.sendNearbyToken(peerID: peerID, requestID: requestID, token: data) }
+            self.append(ExperimentRecord(
+                kind: .uwb,
+                name: "token",
+                phase: "handoffToNetwork",
+                outcome: .info,
+                byteCount: data.count,
+                metadata: ["requestID": requestID.uuidString, "peerID": peerID.uuidString]
+            ))
+            Task { await self.transport.sendNearbyToken(peerID: peerID, requestID: requestID, token: data) }
         }
         calls.onAnswer = { [weak self] callID in
             guard let self else { return }
@@ -325,46 +376,49 @@ final class ExperimentCoordinator {
             guard let self else { return }
             _ = self.bluetooth.send(.callEnd(callID: callID), ttl: 30)
         }
-        calls.onStartOutgoing = { [weak self] _ in
+        calls.onStartOutgoing = { [weak self] callID in
             guard let self else { return }
+            _ = self.bluetooth.send(.callOffer(callID: callID, displayName: self.displayName), ttl: 30)
             Task { await self.updateConnectionCounts() }
         }
         calls.onVoicePacket = { [weak self] packet in
             guard let self else { return }
-            Task { await self.wifi.sendVoice(packet) }
+            Task { await self.transport.sendVoice(packet) }
         }
         Task {
-            await wifi.setStatusSink { [weak self] status in
-                await self?.applyWiFiStatus(status)
+            await transport.setStatusSink { [weak self] status in
+                await self?.applyTransportStatus(status)
             }
-            await wifi.setMessageSink { [weak self] message in
+            await transport.setMessageSink { [weak self] message in
                 await self?.handleDataMessage(message)
             }
-            await wifi.setVoiceSink { [weak self] packet in
+            await transport.setVoiceSink { [weak self] packet in
                 await self?.handleVoicePacket(packet)
             }
         }
     }
 
-    private func applyWiFiStatus(_ status: WiFiAwareExperimentStatus) {
-        wifiPairedDeviceNames = status.pairedDeviceNames
-        wifiDataPublisherState = status.dataPublisherState
-        wifiVoicePublisherState = status.voicePublisherState
-        wifiDiscoveryState = status.discoveryState
-        wifiConnectionState = status.connectionState
+    private func applyTransportStatus(_ status: PeerToPeerTransportStatus) {
+        bonjourDiscoveredMemberNames = status.discoveredMemberNames
+        dataPublisherState = status.dataPublisherState
+        voicePublisherState = status.voicePublisherState
+        discoveryState = status.discoveryState
+        connectionState = status.connectionState
         dataConnectionCount = status.dataConnectionCount
         voiceConnectionCount = status.voiceConnectionCount
-        wifiLastError = status.lastError
+        transportLastError = status.lastError
     }
 
     private func handleControl(_ message: ControlMessage) {
         switch message.kind {
+        case let .groupHello(groupID, name):
+            append(ExperimentRecord(kind: .bluetooth, name: "groupPairing", phase: "authenticated", outcome: .success, metadata: ["groupID": groupID, "member": name]))
         case .dataAvailable:
             coordinatorLogger.notice("BLE dataAvailable received messageID=\(message.id.uuidString, privacy: .public)")
             Task {
-                coordinatorLogger.notice("BLE dataAvailable WiFi sync begin messageID=\(message.id.uuidString, privacy: .public)")
-                let success = await wifi.requestSync()
-                coordinatorLogger.notice("BLE dataAvailable WiFi sync end success=\(success) messageID=\(message.id.uuidString, privacy: .public)")
+                coordinatorLogger.notice("BLE dataAvailable Bonjour sync begin messageID=\(message.id.uuidString, privacy: .public)")
+                let success = await transport.requestSync()
+                coordinatorLogger.notice("BLE dataAvailable Bonjour sync end success=\(success) messageID=\(message.id.uuidString, privacy: .public)")
                 if !success {
                     coordinatorLogger.notice("BLE dataAvailable fallback notification begin")
                     await notifications.genericDataAvailableFailure()
@@ -391,6 +445,13 @@ final class ExperimentCoordinator {
                 ]
             ))
         case let .precisionLocateRequest(deadline):
+            append(ExperimentRecord(
+                kind: .uwb,
+                name: "precisionRequest",
+                phase: "receivedOverBLE",
+                outcome: .info,
+                metadata: ["requestID": message.id.uuidString, "peerID": message.senderID.uuidString]
+            ))
             if location.sharingPaused {
                 _ = bluetooth.send(.precisionLocateResponse(requestID: message.id, accepted: false, reason: "sharingPaused"))
                 return
@@ -405,6 +466,13 @@ final class ExperimentCoordinator {
             Task { await notifications.precisionRequest(request) }
         case let .precisionLocateResponse(requestID, accepted, reason):
             if accepted {
+                append(ExperimentRecord(
+                    kind: .uwb,
+                    name: "precisionRequest",
+                    phase: "acceptedOverBLE",
+                    outcome: .success,
+                    metadata: ["requestID": requestID.uuidString, "peerID": message.senderID.uuidString]
+                ))
                 nearby.begin(peerID: message.senderID, requestID: requestID)
             } else {
                 append(ExperimentRecord(kind: .uwb, name: "precisionRequest", phase: "rejected", outcome: .failure, metadata: ["reason": reason ?? "unknown"]))
@@ -435,6 +503,14 @@ final class ExperimentCoordinator {
             await notifications.synchronizedMessage(count: 1)
         case let .nearbyToken(senderID, peerID, requestID, token):
             guard peerID == deviceID else { return }
+            append(ExperimentRecord(
+                kind: .uwb,
+                name: "token",
+                phase: "deliveredFromNetwork",
+                outcome: .info,
+                byteCount: token.count,
+                metadata: ["requestID": requestID.uuidString, "peerID": senderID.uuidString]
+            ))
             nearby.receiveToken(from: senderID, requestID: requestID, data: token)
         default:
             break
@@ -490,7 +566,7 @@ final class ExperimentCoordinator {
     }
 
     private func updateConnectionCounts() async {
-        let counts = await wifi.connectionCounts()
+        let counts = await transport.connectionCounts()
         dataConnectionCount = counts.data
         voiceConnectionCount = counts.voice
     }

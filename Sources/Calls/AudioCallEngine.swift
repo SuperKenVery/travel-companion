@@ -36,7 +36,6 @@ final class AudioCallEngine {
             options: [.allowBluetoothHFP, .defaultToSpeaker]
         )
         try session.setPreferredIOBufferDuration(0.02)
-        try session.setActive(true)
         log(name: "audioSession", phase: "prepared", outcome: .success, metadata: [
             "sampleRate": String(session.sampleRate),
             "ioBufferDuration": String(session.ioBufferDuration),
@@ -149,4 +148,3 @@ final class AudioCallEngine {
         Task { await eventSink(record) }
     }
 }
-

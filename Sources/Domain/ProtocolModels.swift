@@ -1,4 +1,65 @@
+import CryptoKit
 import Foundation
+
+struct NearbyGroupCredentials: Codable, Sendable, Equatable {
+    static let defaultsKey = "nearbyGroupCredentials"
+
+    let id: String
+    let keyData: Data
+
+    static func derive(fromPIN rawPIN: String) throws -> Self {
+        let pin = rawPIN.filter(\.isNumber)
+        guard pin.count == 6, pin == rawPIN.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            throw GroupPairingError.invalidPIN
+        }
+        let key = HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: Data(pin.utf8)),
+            salt: Data("travel-companion-ble-pin-v1".utf8),
+            info: Data("nearby-group-control-key".utf8),
+            outputByteCount: 32
+        )
+        let keyData = key.withUnsafeBytes { Data($0) }
+        let digest = SHA256.hash(data: keyData + Data("nearby-group-id".utf8))
+        let id = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return Self(id: id, keyData: keyData)
+    }
+
+    static func generatePIN() -> String {
+        String(format: "%06d", Int.random(in: 0...999_999))
+    }
+
+    static func load(defaults: UserDefaults = .standard) -> Self? {
+        guard let data = defaults.data(forKey: defaultsKey) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }
+
+    func save(defaults: UserDefaults = .standard) throws {
+        defaults.set(try JSONEncoder().encode(self), forKey: Self.defaultsKey)
+    }
+
+    static func clear(defaults: UserDefaults = .standard) {
+        defaults.removeObject(forKey: defaultsKey)
+    }
+
+    func authenticationTag(for payload: Data) -> Data {
+        Data(HMAC<SHA256>.authenticationCode(for: payload, using: SymmetricKey(data: keyData)))
+    }
+
+    func authenticates(_ tag: Data, payload: Data) -> Bool {
+        HMAC<SHA256>.isValidAuthenticationCode(tag, authenticating: payload, using: SymmetricKey(data: keyData))
+    }
+}
+
+enum GroupPairingError: LocalizedError {
+    case invalidPIN
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPIN:
+            "PIN 必须是 6 位数字"
+        }
+    }
+}
 
 struct LocationSample: Codable, Sendable, Hashable {
     let latitude: Double
@@ -22,6 +83,7 @@ enum LocationResponseStatus: String, Codable, Sendable {
 }
 
 enum ControlKind: Codable, Sendable, Hashable {
+    case groupHello(groupID: String, name: String)
     case dataAvailable(cursor: UInt64)
     case locationRequest(desiredFreshness: TimeInterval, deadline: Date)
     case locationResponse(requestID: UUID, sample: LocationSample?, status: LocationResponseStatus)
@@ -36,7 +98,7 @@ enum ControlKind: Codable, Sendable, Hashable {
 }
 
 struct ControlMessage: Codable, Sendable, Identifiable, Hashable {
-    static let currentProtocolVersion = 1
+    static let currentProtocolVersion = 2
 
     let protocolVersion: Int
     let id: UUID
@@ -91,7 +153,7 @@ struct ResourceChunk: Codable, Sendable, Hashable {
 }
 
 enum DataPlaneMessage: Codable, Sendable, Hashable {
-    case hello(deviceID: UUID, name: String)
+    case hello(deviceID: UUID, name: String, groupID: String, nonce: UUID, authenticationTag: Data)
     case ping(id: UUID, sentAt: Date)
     case pong(id: UUID, sentAt: Date)
     case text(ReplicatedTextEvent)
@@ -112,6 +174,11 @@ struct VoicePacket: Codable, Sendable, Hashable {
     let sampleRate: Double
     let channelCount: UInt32
     let pcm16: Data
+}
+
+struct AuthenticatedVoicePacket: Codable, Sendable, Hashable {
+    let packet: VoicePacket
+    let authenticationTag: Data
 }
 
 struct PendingPrecisionRequest: Identifiable, Sendable, Hashable {
