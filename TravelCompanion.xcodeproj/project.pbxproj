@@ -1,0 +1,561 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0B4C90A1E4FD34D996D58DAC /* BluetoothControlPlane.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81F7153937E9033C156648A9 /* BluetoothControlPlane.swift */; };
+		123304652021392A933A76C0 /* ExperimentModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C535BE62E4930F023E2F37E /* ExperimentModels.swift */; };
+		1E36D937BFA8AE15FD1E2BFD /* TravelCompanionApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1927826632349A1582A03659 /* TravelCompanionApp.swift */; };
+		2968EADEBB60E616A05B07B9 /* ExperimentCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 356CAEA70D9F538A9AFAFAD8 /* ExperimentCoordinator.swift */; };
+		29B79F2FF3DD0D4B66B8C599 /* AudioCallEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F9D71CECCCD5C9A10C8F124 /* AudioCallEngine.swift */; };
+		2F58888EAE4943AC95C8834E /* WiFiAwareExperiment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */; };
+		3906CB1254B8C7874EA91F9D /* ValidationTLSConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */; };
+		3FD2B8DC6BE9A3D98E56B1D5 /* LocalNotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A539C1980A99C7D3CF9C5024 /* LocalNotificationManager.swift */; };
+		5D421AACFBA2D01CEFF4B0F4 /* PersistenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0564F7D9E5784E741A653F13 /* PersistenceTests.swift */; };
+		6586119100CC06048ED82D16 /* OfflineCallManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11EE34AC3F665ABEE0173DE1 /* OfflineCallManager.swift */; };
+		6EB7F3B26CE43070D6BA2A44 /* ExperimentModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F0C86EB326B6EBB6A54AB45 /* ExperimentModelsTests.swift */; };
+		6F0A13C6AD7AB1F2704BDA4B /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7CE6A0A976C0A238AEEDD6D2 /* AppDelegate.swift */; };
+		72FA0D84911908C541995DAC /* ValidationEventStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A58AC13501000E9B24450496 /* ValidationEventStore.swift */; };
+		A36A79F8CDB482FEDE9448E9 /* DiagnosticsRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA36002561FBBFB8BA4D5D13 /* DiagnosticsRootView.swift */; };
+		A5291D1FC6442C30AB62F260 /* PairingViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69EA6584973714E430851337 /* PairingViews.swift */; };
+		A5C04E7EB99E66DBBD25572B /* BLEControlCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C3327125A5CDCD76ED4274 /* BLEControlCodecTests.swift */; };
+		A723617CC379F73D29EDC63A /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D89428FBAC9D3F79B13A1DAD /* Assets.xcassets */; };
+		AEA6F0ACBB03EF8CF7FDC08E /* ProtocolModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4917A77FB1A07EED8B3FD94 /* ProtocolModels.swift */; };
+		D7C796A3D8C3522DEE84A4E6 /* LocationExperimentEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 561FA883EF2BC5A8B3F7A174 /* LocationExperimentEngine.swift */; };
+		ECB6ED4FEA9BD60B3CABC08B /* ExperimentLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E70E55421AB24AE2AB120A1 /* ExperimentLogStore.swift */; };
+		ECD70FBB7E152087BC59BB49 /* NearbyInteractionExperiment.swift in Sources */ = {isa = PBXBuildFile; fileRef = EE4DC52A58148792F931F779 /* NearbyInteractionExperiment.swift */; };
+		F152B7F859FB8450E9DE4EB2 /* ResourceTransferStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2314D4F720738D202B2C69CA /* ResourceTransferStore.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		14D74CF58D8971FF3046CC3D /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 00C6EDEE6A662AA968BB92AA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BB8137DBDD0AE5BE3A50B908;
+			remoteInfo = TravelCompanion;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		0564F7D9E5784E741A653F13 /* PersistenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersistenceTests.swift; sourceTree = "<group>"; };
+		0F0C86EB326B6EBB6A54AB45 /* ExperimentModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentModelsTests.swift; sourceTree = "<group>"; };
+		0F9D71CECCCD5C9A10C8F124 /* AudioCallEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioCallEngine.swift; sourceTree = "<group>"; };
+		11EE34AC3F665ABEE0173DE1 /* OfflineCallManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfflineCallManager.swift; sourceTree = "<group>"; };
+		18A9E15E3BBFAF43F73168C0 /* TravelCompanionTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TravelCompanionTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		1927826632349A1582A03659 /* TravelCompanionApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TravelCompanionApp.swift; sourceTree = "<group>"; };
+		1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WiFiAwareExperiment.swift; sourceTree = "<group>"; };
+		214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ValidationTLSConfiguration.swift; sourceTree = "<group>"; };
+		2314D4F720738D202B2C69CA /* ResourceTransferStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResourceTransferStore.swift; sourceTree = "<group>"; };
+		2E70E55421AB24AE2AB120A1 /* ExperimentLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentLogStore.swift; sourceTree = "<group>"; };
+		356CAEA70D9F538A9AFAFAD8 /* ExperimentCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentCoordinator.swift; sourceTree = "<group>"; };
+		561FA883EF2BC5A8B3F7A174 /* LocationExperimentEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocationExperimentEngine.swift; sourceTree = "<group>"; };
+		5C535BE62E4930F023E2F37E /* ExperimentModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExperimentModels.swift; sourceTree = "<group>"; };
+		660F4C444ECFE128677DA7F2 /* TravelCompanion.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = TravelCompanion.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		69EA6584973714E430851337 /* PairingViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingViews.swift; sourceTree = "<group>"; };
+		73C3327125A5CDCD76ED4274 /* BLEControlCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BLEControlCodecTests.swift; sourceTree = "<group>"; };
+		7CE6A0A976C0A238AEEDD6D2 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		81F7153937E9033C156648A9 /* BluetoothControlPlane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BluetoothControlPlane.swift; sourceTree = "<group>"; };
+		A539C1980A99C7D3CF9C5024 /* LocalNotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalNotificationManager.swift; sourceTree = "<group>"; };
+		A58AC13501000E9B24450496 /* ValidationEventStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ValidationEventStore.swift; sourceTree = "<group>"; };
+		AA36002561FBBFB8BA4D5D13 /* DiagnosticsRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsRootView.swift; sourceTree = "<group>"; };
+		D557280C2C470B9C74C1CA3F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		D89428FBAC9D3F79B13A1DAD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		E4917A77FB1A07EED8B3FD94 /* ProtocolModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolModels.swift; sourceTree = "<group>"; };
+		EE4DC52A58148792F931F779 /* NearbyInteractionExperiment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NearbyInteractionExperiment.swift; sourceTree = "<group>"; };
+		F0BE2E9F460F2D32F5C2D65B /* TravelCompanion.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = TravelCompanion.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		173F13CE1FDA04A2144187DB /* Nearby */ = {
+			isa = PBXGroup;
+			children = (
+				EE4DC52A58148792F931F779 /* NearbyInteractionExperiment.swift */,
+			);
+			path = Nearby;
+			sourceTree = "<group>";
+		};
+		39E06CED130662D8F93AAD90 /* Diagnostics */ = {
+			isa = PBXGroup;
+			children = (
+				2E70E55421AB24AE2AB120A1 /* ExperimentLogStore.swift */,
+				A539C1980A99C7D3CF9C5024 /* LocalNotificationManager.swift */,
+				2314D4F720738D202B2C69CA /* ResourceTransferStore.swift */,
+				A58AC13501000E9B24450496 /* ValidationEventStore.swift */,
+			);
+			path = Diagnostics;
+			sourceTree = "<group>";
+		};
+		45BB53E646E9750C56A67E6C /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				D89428FBAC9D3F79B13A1DAD /* Assets.xcassets */,
+				7BD86567787450946CCC07E1 /* App */,
+				B47F8E020121EC00A823E580 /* Calls */,
+				39E06CED130662D8F93AAD90 /* Diagnostics */,
+				BEB50B10F0B78E36BFAA23D7 /* Domain */,
+				F9465B6889577AFF1CD2529E /* Features */,
+				DBEFC54523D34068B94E68E3 /* Location */,
+				173F13CE1FDA04A2144187DB /* Nearby */,
+				99D5247592A85F104DB92ACB /* Transport */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		7BD86567787450946CCC07E1 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				7CE6A0A976C0A238AEEDD6D2 /* AppDelegate.swift */,
+				356CAEA70D9F538A9AFAFAD8 /* ExperimentCoordinator.swift */,
+				D557280C2C470B9C74C1CA3F /* Info.plist */,
+				F0BE2E9F460F2D32F5C2D65B /* TravelCompanion.entitlements */,
+				1927826632349A1582A03659 /* TravelCompanionApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		8272E0C144B6B07325BEDF5D /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				73C3327125A5CDCD76ED4274 /* BLEControlCodecTests.swift */,
+				0F0C86EB326B6EBB6A54AB45 /* ExperimentModelsTests.swift */,
+				0564F7D9E5784E741A653F13 /* PersistenceTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		99D5247592A85F104DB92ACB /* Transport */ = {
+			isa = PBXGroup;
+			children = (
+				81F7153937E9033C156648A9 /* BluetoothControlPlane.swift */,
+				214FFDAFBAB2F7B82EC9E964 /* ValidationTLSConfiguration.swift */,
+				1B9FDBC527146E39828585F3 /* WiFiAwareExperiment.swift */,
+			);
+			path = Transport;
+			sourceTree = "<group>";
+		};
+		9C00F592F723C700D8D27F28 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				660F4C444ECFE128677DA7F2 /* TravelCompanion.app */,
+				18A9E15E3BBFAF43F73168C0 /* TravelCompanionTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		B47F8E020121EC00A823E580 /* Calls */ = {
+			isa = PBXGroup;
+			children = (
+				0F9D71CECCCD5C9A10C8F124 /* AudioCallEngine.swift */,
+				11EE34AC3F665ABEE0173DE1 /* OfflineCallManager.swift */,
+			);
+			path = Calls;
+			sourceTree = "<group>";
+		};
+		BEB50B10F0B78E36BFAA23D7 /* Domain */ = {
+			isa = PBXGroup;
+			children = (
+				5C535BE62E4930F023E2F37E /* ExperimentModels.swift */,
+				E4917A77FB1A07EED8B3FD94 /* ProtocolModels.swift */,
+			);
+			path = Domain;
+			sourceTree = "<group>";
+		};
+		DBEFC54523D34068B94E68E3 /* Location */ = {
+			isa = PBXGroup;
+			children = (
+				561FA883EF2BC5A8B3F7A174 /* LocationExperimentEngine.swift */,
+			);
+			path = Location;
+			sourceTree = "<group>";
+		};
+		F8B89361BE22204F07EF412B = {
+			isa = PBXGroup;
+			children = (
+				45BB53E646E9750C56A67E6C /* Sources */,
+				8272E0C144B6B07325BEDF5D /* Tests */,
+				9C00F592F723C700D8D27F28 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		F9465B6889577AFF1CD2529E /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				AA36002561FBBFB8BA4D5D13 /* DiagnosticsRootView.swift */,
+				69EA6584973714E430851337 /* PairingViews.swift */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BB8137DBDD0AE5BE3A50B908 /* TravelCompanion */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 55954BC6648E62121A99ACB6 /* Build configuration list for PBXNativeTarget "TravelCompanion" */;
+			buildPhases = (
+				1E8831AF6AD2ED769985D131 /* Sources */,
+				33CA99B46FACED217EE4A05C /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = TravelCompanion;
+			packageProductDependencies = (
+			);
+			productName = TravelCompanion;
+			productReference = 660F4C444ECFE128677DA7F2 /* TravelCompanion.app */;
+			productType = "com.apple.product-type.application";
+		};
+		CEF1638DFFD60A506F5E704C /* TravelCompanionTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CF52BCCD679D000823C6AEC3 /* Build configuration list for PBXNativeTarget "TravelCompanionTests" */;
+			buildPhases = (
+				8524D19482F643DD26E8B056 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9D2267DDD9C9316B275DC5BE /* PBXTargetDependency */,
+			);
+			name = TravelCompanionTests;
+			packageProductDependencies = (
+			);
+			productName = TravelCompanionTests;
+			productReference = 18A9E15E3BBFAF43F73168C0 /* TravelCompanionTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		00C6EDEE6A662AA968BB92AA /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+			};
+			buildConfigurationList = 2D12571D7BF728CDEE1E18FC /* Build configuration list for PBXProject "TravelCompanion" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = F8B89361BE22204F07EF412B;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BB8137DBDD0AE5BE3A50B908 /* TravelCompanion */,
+				CEF1638DFFD60A506F5E704C /* TravelCompanionTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		33CA99B46FACED217EE4A05C /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A723617CC379F73D29EDC63A /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		1E8831AF6AD2ED769985D131 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				6F0A13C6AD7AB1F2704BDA4B /* AppDelegate.swift in Sources */,
+				29B79F2FF3DD0D4B66B8C599 /* AudioCallEngine.swift in Sources */,
+				0B4C90A1E4FD34D996D58DAC /* BluetoothControlPlane.swift in Sources */,
+				A36A79F8CDB482FEDE9448E9 /* DiagnosticsRootView.swift in Sources */,
+				2968EADEBB60E616A05B07B9 /* ExperimentCoordinator.swift in Sources */,
+				ECB6ED4FEA9BD60B3CABC08B /* ExperimentLogStore.swift in Sources */,
+				123304652021392A933A76C0 /* ExperimentModels.swift in Sources */,
+				3FD2B8DC6BE9A3D98E56B1D5 /* LocalNotificationManager.swift in Sources */,
+				D7C796A3D8C3522DEE84A4E6 /* LocationExperimentEngine.swift in Sources */,
+				ECD70FBB7E152087BC59BB49 /* NearbyInteractionExperiment.swift in Sources */,
+				6586119100CC06048ED82D16 /* OfflineCallManager.swift in Sources */,
+				A5291D1FC6442C30AB62F260 /* PairingViews.swift in Sources */,
+				AEA6F0ACBB03EF8CF7FDC08E /* ProtocolModels.swift in Sources */,
+				F152B7F859FB8450E9DE4EB2 /* ResourceTransferStore.swift in Sources */,
+				1E36D937BFA8AE15FD1E2BFD /* TravelCompanionApp.swift in Sources */,
+				72FA0D84911908C541995DAC /* ValidationEventStore.swift in Sources */,
+				3906CB1254B8C7874EA91F9D /* ValidationTLSConfiguration.swift in Sources */,
+				2F58888EAE4943AC95C8834E /* WiFiAwareExperiment.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8524D19482F643DD26E8B056 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A5C04E7EB99E66DBBD25572B /* BLEControlCodecTests.swift in Sources */,
+				6EB7F3B26CE43070D6BA2A44 /* ExperimentModelsTests.swift in Sources */,
+				5D421AACFBA2D01CEFF4B0F4 /* PersistenceTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9D2267DDD9C9316B275DC5BE /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BB8137DBDD0AE5BE3A50B908 /* TravelCompanion */;
+			targetProxy = 14D74CF58D8971FF3046CC3D /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		1EC6458D4F11F13E5D66BA84 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidationTests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TravelCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TravelCompanion";
+			};
+			name = Release;
+		};
+		1FD0E3488D0E56577A4FF3B5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		27F0DE011236ACA0D6A460EC /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Sources/App/TravelCompanion.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = Sources/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidation;
+				PRODUCT_NAME = TravelCompanion;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		5DD195A786C63CE30E5F8E1E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		96358EC3AD6900DEDC223C66 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Sources/App/TravelCompanion.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				ENABLE_PREVIEWS = YES;
+				INFOPLIST_FILE = Sources/App/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidation;
+				PRODUCT_NAME = TravelCompanion;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		E1CD3FB1C50E79C80F33E8D5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.ken.TravelCompanionValidationTests;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = iphoneos;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/TravelCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TravelCompanion";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		2D12571D7BF728CDEE1E18FC /* Build configuration list for PBXProject "TravelCompanion" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5DD195A786C63CE30E5F8E1E /* Debug */,
+				1FD0E3488D0E56577A4FF3B5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		55954BC6648E62121A99ACB6 /* Build configuration list for PBXNativeTarget "TravelCompanion" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				96358EC3AD6900DEDC223C66 /* Debug */,
+				27F0DE011236ACA0D6A460EC /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CF52BCCD679D000823C6AEC3 /* Build configuration list for PBXNativeTarget "TravelCompanionTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E1CD3FB1C50E79C80F33E8D5 /* Debug */,
+				1EC6458D4F11F13E5D66BA84 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 00C6EDEE6A662AA968BB92AA /* Project object */;
+}

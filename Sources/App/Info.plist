@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleDisplayName</key>
+    <string>旅行伴侣验证</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>CFBundleVersion</key>
+	<string>2</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>audio</string>
+        <string>bluetooth-central</string>
+        <string>bluetooth-peripheral</string>
+        <string>location</string>
+    </array>
+    <key>CLRequireExplicitServiceSession</key>
+    <true/>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>旅行期间通过蓝牙接收成员位置请求、同步提示和离线来电信令。</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>旅行期间通过蓝牙向附近群组成员提供加密控制信令。</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>在同行雷达中显示你和同行成员的相对位置。</string>
+    <key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+    <string>旅行开始后，即使锁屏或切换到后台也可按系统允许程度回应同行成员的位置请求。</string>
+    <key>NSLocationTemporaryUsageDescriptionDictionary</key>
+    <dict>
+        <key>PreciseTripLocation</key>
+        <string>验证按需提高位置新鲜度和精度。</string>
+    </dict>
+    <key>NSNearbyInteractionUsageDescription</key>
+    <string>双方确认后使用 UWB 测量同行成员的精确距离和方向。</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>通过无互联网的 Wi-Fi Aware 点对点链路同步旅行数据和通话音频。</string>
+    <key>WiFiAwareServices</key>
+    <dict>
+        <key>_tc-validate._tcp</key>
+        <dict>
+            <key>Publishable</key>
+            <dict/>
+            <key>Subscribable</key>
+            <dict/>
+        </dict>
+        <key>_tc-voice._udp</key>
+        <dict>
+            <key>Publishable</key>
+            <dict/>
+            <key>Subscribable</key>
+            <dict/>
+        </dict>
+    </dict>
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+</dict>
+</plist>
