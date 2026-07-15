@@ -31,18 +31,18 @@ SwiftUI feature views
         v
 TravelCore.swift
         |
-        | public C ABI + value-only JSON
+        | public UniFFI object + listener
         v
 tc-app-ffi  --->  tc-core
                     |
                     +--> domain/store/replication/resource crates
                     |
-                    +--> platform-neutral tc-* capability contracts
+                    +--> tc-* UniFFI foreign traits
                                       |
-                       module command/event queue
+                           typed operation/event calls
                                       |
                                       v
-                         AppleCapabilityRuntime (thin router)
+                    AppleCapabilityRuntime (actor adapters)
                                       |
           +---------------------------+---------------------------+
           v             v             v             v             v
@@ -52,8 +52,8 @@ tc-app-ffi  --->  tc-core
 
 - `crates/` 放置平台无关的模型、密码学、入群、协议、SQLite 事件日志、复制、资源、定位逻辑、IM、文档、通话与顶层核心。
 - `modules/tc-*/` 是纵向自包含的 polyglot capability module：同一目录含 Rust 语义 API、fake backend、Swift Package 与 Apple framework 实现。
-- `bindings/tc-app-ffi/` 是 GUI 可见的唯一 Rust ABI。SwiftUI 不直接依赖内部 crate 或 module binding。
-- `app-ios/TravelCompanion/` 只负责 SwiftUI、App 生命周期、权限文案，以及把普通 command/event 路由到相应 Apple backend。
+- `bindings/tc-app-ffi/` 是 GUI 可见的唯一 Rust UniFFI 门面，并聚合各 module 的私有 foreign-trait binding。SwiftUI 不直接依赖内部 crate。
+- `app-ios/TravelCompanion/` 只负责 SwiftUI、App 生命周期、权限文案，以及把 UniFFI callback 有序送到相应 Apple backend actor。
 - `project.yml`、`scripts/` 和 `xtask/` 负责可重复装配；生成的 Xcode 工程与构建产物不作为源码提交。
 
 更精确的依赖方向、FFI 层次与数据流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
@@ -90,7 +90,7 @@ tc-app-ffi  --->  tc-core
 ```text
 crates/                     Rust 领域与基础设施
 modules/tc-*/               Rust capability + Apple Swift Package
-bindings/tc-app-ffi/        面向 GUI 的公共 C ABI
+bindings/tc-app-ffi/        面向 GUI 的公共 UniFFI 门面与生成 binding
 app-ios/TravelCompanion/    SwiftUI App 与薄装配层
 app-ios/TravelCompanionTests/
 prototypes/ios-validation-lab/

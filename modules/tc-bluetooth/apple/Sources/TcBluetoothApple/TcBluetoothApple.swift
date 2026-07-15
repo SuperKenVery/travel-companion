@@ -1,62 +1,61 @@
 @preconcurrency import CoreBluetooth
 import Foundation
 
-public typealias TcBluetoothEventSink = @MainActor @Sendable (Data) -> Void
+public enum TcBluetoothEvent: Sendable, Equatable {
+    case started(requestID: String)
+    case stopped(requestID: String)
+    case peerDiscovered(peerID: String, handle: UInt64)
+    case connected(requestID: String, handle: UInt64)
+    case disconnected(handle: UInt64, reason: String)
+    case packetReceived(handle: UInt64, packet: Data)
+    case packetSent(requestID: String)
+    case failed(requestID: String?, code: String, message: String, retryable: Bool)
+}
+
+public typealias TcBluetoothEventSink = @MainActor @Sendable (TcBluetoothEvent) -> Void
+
+/// Platform capability values exposed without leaking CoreBluetooth objects.
+public struct TcBluetoothCapabilitySnapshot: Sendable, Equatable {
+    public let central: Bool
+    public let peripheral: Bool
+    public let stateRestoration: Bool
+    public let backgroundControl: Bool
+    public let maxPacketBytes: UInt32
+
+    public init(
+        central: Bool,
+        peripheral: Bool,
+        stateRestoration: Bool,
+        backgroundControl: Bool,
+        maxPacketBytes: UInt32
+    ) {
+        self.central = central
+        self.peripheral = peripheral
+        self.stateRestoration = stateRestoration
+        self.backgroundControl = backgroundControl
+        self.maxPacketBytes = maxPacketBytes
+    }
+}
 
 /// Core Bluetooth backend. All CoreBluetooth objects remain owned by this main-actor object;
-/// callers only see JSON values and stable UInt64 handles.
+/// callers only see typed values and stable UInt64 handles.
 @MainActor
 public final class TcBluetoothAppleBackend: NSObject {
-    public static let serviceUUID = CBUUID(string: "7D59F31B-FF93-4D06-9B34-1AF354A3D581")
-    public static let controlUUID = CBUUID(string: "7D59F31C-FF93-4D06-9B34-1AF354A3D581")
+    private static let serviceUUID = CBUUID(string: "7D59F31B-FF93-4D06-9B34-1AF354A3D581")
+    private static let controlUUID = CBUUID(string: "7D59F31C-FF93-4D06-9B34-1AF354A3D581")
 
     private static let centralRestoreID = "com.travelcompanion.tc-bluetooth.central"
     private static let peripheralRestoreID = "com.travelcompanion.tc-bluetooth.peripheral"
-    private static let maximumControlPacket = 180
+    private nonisolated static let maximumPacketBytes = 180
 
-    private struct Command: Decodable {
-        var type: String
-        var requestID: String?
-        var peerHandle: UInt64?
-        var messageID: String?
-        var sequence: UInt64?
-        var ttlMillis: UInt64?
-        var payloadBase64: String?
-        var requiresAck: Bool?
-    }
-
-    private struct Event: Encodable {
-        var type: String
-        var requestID: String?
-        var peerHandle: UInt64?
-        var messageID: String?
-        var sequence: UInt64?
-        var payloadBase64: String?
-        var fields: [String: String]?
-        var error: String?
-    }
-
-    private struct WireEnvelope: Codable {
-        enum Kind: String, Codable { case data, ack }
-        var version: UInt8 = 1
-        var kind: Kind
-        var messageID: UUID
-        var sequence: UInt64
-        var createdAtMillis: UInt64
-        var ttlMillis: UInt64
-        var requiresAck: Bool
-        var payload: Data?
-
-        var isExpired: Bool {
-            let now = UInt64(max(0, Date.now.timeIntervalSince1970 * 1_000))
-            return now > createdAtMillis &+ ttlMillis
-        }
-    }
-
-    private struct FragmentAssembly {
-        var createdAt = Date.now
-        var total: UInt16
-        var pieces: [UInt16: Data] = [:]
+    public nonisolated static var capabilitySnapshot: TcBluetoothCapabilitySnapshot {
+        TcBluetoothCapabilitySnapshot(
+            central: true,
+            peripheral: true,
+            stateRestoration: true,
+            backgroundControl: true,
+            maxPacketBytes: UInt32(maximumPacketBytes)
+        )
     }
 
     private struct PendingNotification {
@@ -75,9 +74,8 @@ public final class TcBluetoothAppleBackend: NSObject {
     private var peripherals: [UInt64: CBPeripheral] = [:]
     private var writableCharacteristics: [UInt64: CBCharacteristic] = [:]
     private var subscribedCentrals: [UInt64: CBCentral] = [:]
-    private var assemblies: [String: FragmentAssembly] = [:]
-    private var seenMessageIDs: Set<UUID> = []
-    private var seenMessageOrder: [UUID] = []
+    private var readyHandles: Set<UInt64> = []
+    private var pendingConnectRequests: [UInt64: String] = [:]
     private var pendingNotifications: [PendingNotification] = []
     private var pendingCentralWrites: [UInt64: [Data]] = [:]
 
@@ -86,41 +84,13 @@ public final class TcBluetoothAppleBackend: NSObject {
         super.init()
     }
 
-    public func submit(_ json: Data) {
-        let command: Command
-        do {
-            command = try JSONDecoder().decode(Command.self, from: json)
-        } catch {
-            emit(.init(type: "commandFailed", error: String(describing: error)))
-            return
-        }
-        do {
-            switch command.type {
-            case "start":
-                start(requestID: command.requestID)
-            case "stop":
-                stop(requestID: command.requestID)
-            case "snapshot":
-                emitSnapshot(requestID: command.requestID)
-            case "sendControl":
-                try send(command)
-            case "disconnect":
-                disconnect(command)
-            default:
-                emit(.init(type: "commandFailed", requestID: command.requestID, error: "unknown command: \(command.type)"))
-            }
-        } catch {
-            emit(.init(type: "commandFailed", requestID: command.requestID, peerHandle: command.peerHandle, error: String(describing: error)))
-        }
-    }
-
     public func shutdown() {
-        stop(requestID: nil)
+        tearDown()
     }
 
-    private func start(requestID: String?) {
+    public func start(requestID: String) {
         guard !isRunning else {
-            emit(.init(type: "commandCompleted", requestID: requestID, fields: ["command": "start", "reused": "true"]))
+            emit(.started(requestID: requestID))
             return
         }
         isRunning = true
@@ -137,10 +107,15 @@ public final class TcBluetoothAppleBackend: NSObject {
             queue: .main,
             options: [CBPeripheralManagerOptionRestoreIdentifierKey: Self.peripheralRestoreID]
         )
-        emit(.init(type: "commandCompleted", requestID: requestID, fields: ["command": "start"]))
+        emit(.started(requestID: requestID))
     }
 
-    private func stop(requestID: String?) {
+    public func stop(requestID: String) {
+        tearDown()
+        emit(.stopped(requestID: requestID))
+    }
+
+    private func tearDown() {
         centralManager?.stopScan()
         if let centralManager {
             for peripheral in peripherals.values { centralManager.cancelPeripheralConnection(peripheral) }
@@ -153,65 +128,83 @@ public final class TcBluetoothAppleBackend: NSObject {
         peripherals.removeAll()
         writableCharacteristics.removeAll()
         subscribedCentrals.removeAll()
-        assemblies.removeAll()
+        readyHandles.removeAll()
+        pendingConnectRequests.removeAll()
         pendingNotifications.removeAll()
         pendingCentralWrites.removeAll()
         isRunning = false
-        emit(.init(type: "commandCompleted", requestID: requestID, fields: ["command": "stop"]))
     }
 
-    private func emitSnapshot(requestID: String?) {
-        emit(.init(
-            type: "capabilitySnapshot",
-            requestID: requestID,
-            fields: [
-                "centralState": String(describing: centralManager?.state ?? .unknown),
-                "peripheralState": String(describing: peripheralManager?.state ?? .unknown),
-                "authorization": String(describing: CBManager.authorization),
-                "connectedPeripheralCount": String(peripherals.values.filter { $0.state == .connected }.count),
-                "subscribedCentralCount": String(subscribedCentrals.count),
-                "serviceUUID": Self.serviceUUID.uuidString,
-                "controlUUID": Self.controlUUID.uuidString,
-                "stateRestoration": "true",
-            ]
-        ))
-    }
-
-    private func send(_ command: Command) throws {
-        guard let messageIDText = command.messageID, let messageID = UUID(uuidString: messageIDText) else {
-            throw BackendError.invalidField("messageID")
+    public func connect(requestID: String, handle: UInt64) {
+        do {
+            try connectOperation(requestID: requestID, handle: handle)
+        } catch {
+            fail(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error),
+                retryable: error.isRetryableBluetoothError
+            )
         }
-        guard let payloadText = command.payloadBase64, let payload = Data(base64Encoded: payloadText) else {
-            throw BackendError.invalidField("payloadBase64")
-        }
-        guard payload.count <= 4_096 else { throw BackendError.controlPayloadTooLarge }
-        let envelope = WireEnvelope(
-            kind: .data,
-            messageID: messageID,
-            sequence: command.sequence ?? 0,
-            createdAtMillis: Self.nowMillis,
-            ttlMillis: max(1, command.ttlMillis ?? 30_000),
-            requiresAck: command.requiresAck ?? true,
-            payload: payload
-        )
-        try transmit(envelope, to: command.peerHandle)
-        emit(.init(
-            type: "controlQueued",
-            requestID: command.requestID,
-            peerHandle: command.peerHandle,
-            messageID: messageID.uuidString,
-            sequence: envelope.sequence,
-            fields: ["bytes": String(payload.count)]
-        ))
     }
 
-    private func disconnect(_ command: Command) {
-        guard let handle = command.peerHandle, let peripheral = peripherals[handle] else {
-            emit(.init(type: "commandFailed", requestID: command.requestID, peerHandle: command.peerHandle, error: "unknown peerHandle"))
+    private func connectOperation(requestID: String, handle: UInt64) throws {
+        if readyHandles.contains(handle) {
+            emit(.connected(requestID: requestID, handle: handle))
             return
         }
-        centralManager?.cancelPeripheralConnection(peripheral)
-        emit(.init(type: "commandCompleted", requestID: command.requestID, peerHandle: handle, fields: ["command": "disconnect"]))
+
+        pendingConnectRequests[handle] = requestID
+        guard let peripheral = peripherals[handle] else {
+            // A subscribed central becomes ready through the peripheral role and
+            // will complete this request from didSubscribeTo.
+            if subscribedCentrals[handle] != nil { return }
+            pendingConnectRequests.removeValue(forKey: handle)
+            throw BackendError.peerUnavailable
+        }
+        switch peripheral.state {
+        case .disconnected:
+            centralManager?.connect(peripheral, options: [CBConnectPeripheralOptionEnableAutoReconnect: true])
+        case .connected:
+            peripheral.discoverServices([Self.serviceUUID])
+        case .connecting, .disconnecting:
+            break
+        @unknown default:
+            break
+        }
+    }
+
+    public func sendPacket(
+        requestID: String,
+        handle: UInt64,
+        packet: Data
+    ) {
+        do {
+            try sendPacketOperation(handle: handle, packet: packet)
+            emit(.packetSent(requestID: requestID))
+        } catch {
+            fail(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error),
+                retryable: error.isRetryableBluetoothError
+            )
+        }
+    }
+
+    public func disconnect(requestID: String, handle: UInt64) {
+        do {
+            guard let peripheral = peripherals[handle] else { throw BackendError.peerUnavailable }
+            pendingConnectRequests.removeValue(forKey: handle)
+            centralManager?.cancelPeripheralConnection(peripheral)
+        } catch {
+            fail(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error),
+                retryable: error.isRetryableBluetoothError
+            )
+        }
     }
 
     private func configurePeripheralService() {
@@ -236,40 +229,50 @@ public final class TcBluetoothAppleBackend: NSObject {
     }
 
     private func handle(for platformID: UUID) -> UInt64 {
-        if let existing = handleByPlatformID[platformID] { return existing }
+        if let existing = handleByPlatformID[platformID] {
+            return existing
+        }
         let handle = nextPeerHandle
         nextPeerHandle &+= 1
         handleByPlatformID[platformID] = handle
-        emit(.init(type: "peerDiscovered", peerHandle: handle, fields: ["platformID": platformID.uuidString]))
+        let peerID = platformID.uuidString.lowercased()
+        emit(.peerDiscovered(peerID: peerID, handle: handle))
         return handle
     }
 
-    private func transmit(_ envelope: WireEnvelope, to target: UInt64?) throws {
-        let encoded = try JSONEncoder().encode(envelope)
+    private func markReady(_ handle: UInt64) {
+        readyHandles.insert(handle)
+        guard let requestID = pendingConnectRequests.removeValue(forKey: handle) else { return }
+        emit(.connected(requestID: requestID, handle: handle))
+    }
+
+    private func sendPacketOperation(handle target: UInt64, packet: Data) throws {
+        guard !packet.isEmpty, packet.count <= Self.maximumPacketBytes else {
+            throw BackendError.packetTooLarge
+        }
         var sentPaths = 0
 
-        for (handle, characteristic) in writableCharacteristics where target == nil || target == handle {
+        for (handle, characteristic) in writableCharacteristics where target == handle {
             guard let peripheral = peripherals[handle], peripheral.state == .connected else { continue }
-            let maximum = min(Self.maximumControlPacket, peripheral.maximumWriteValueLength(for: .withoutResponse))
-            for packet in try Self.fragment(encoded, messageID: envelope.messageID, maximumPacketSize: maximum) {
-                let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-                if writeType == .withoutResponse {
-                    pendingCentralWrites[handle, default: []].append(packet)
-                } else {
-                    peripheral.writeValue(packet, for: characteristic, type: writeType)
-                }
+            let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
+            let maximum = peripheral.maximumWriteValueLength(for: writeType)
+            guard packet.count <= maximum else { throw BackendError.mtuTooSmall }
+            if writeType == .withoutResponse {
+                pendingCentralWrites[handle, default: []].append(packet)
+            } else {
+                peripheral.writeValue(packet, for: characteristic, type: writeType)
             }
             flushCentralWrites(to: handle)
             sentPaths += 1
         }
 
         if let peripheralManager, let characteristic = controlCharacteristic {
-            for (handle, central) in subscribedCentrals where target == nil || target == handle {
-                let maximum = min(Self.maximumControlPacket, central.maximumUpdateValueLength)
-                for packet in try Self.fragment(encoded, messageID: envelope.messageID, maximumPacketSize: maximum) {
-                    if !peripheralManager.updateValue(packet, for: characteristic, onSubscribedCentrals: [central]) {
-                        pendingNotifications.append(.init(data: packet, central: central))
-                    }
+            for (handle, central) in subscribedCentrals where target == handle {
+                guard packet.count <= central.maximumUpdateValueLength else {
+                    throw BackendError.mtuTooSmall
+                }
+                if !peripheralManager.updateValue(packet, for: characteristic, onSubscribedCentrals: [central]) {
+                    pendingNotifications.append(.init(data: packet, central: central))
                 }
                 sentPaths += 1
             }
@@ -296,134 +299,54 @@ public final class TcBluetoothAppleBackend: NSObject {
         }
     }
 
-    private func ingest(_ packet: Data, from peerHandle: UInt64) {
-        do {
-            let fragment = try Self.parseFragment(packet)
-            let key = "\(peerHandle):\(fragment.messageID.uuidString)"
-            var assembly = assemblies[key] ?? FragmentAssembly(total: fragment.total)
-            guard assembly.total == fragment.total else { throw BackendError.invalidFragment }
-            assembly.pieces[fragment.index] = fragment.payload
-            assemblies[key] = assembly
-            purgeAssemblies()
-            guard assembly.pieces.count == Int(assembly.total) else { return }
-            assemblies.removeValue(forKey: key)
-            var data = Data()
-            for index in 0..<assembly.total {
-                guard let piece = assembly.pieces[index] else { throw BackendError.invalidFragment }
-                data.append(piece)
-            }
-            let envelope = try JSONDecoder().decode(WireEnvelope.self, from: data)
-            guard envelope.version == 1 else { throw BackendError.protocolVersion }
-            guard !envelope.isExpired else {
-                emit(.init(type: "controlExpired", peerHandle: peerHandle, messageID: envelope.messageID.uuidString, sequence: envelope.sequence))
-                return
-            }
-            switch envelope.kind {
-            case .ack:
-                emit(.init(type: "controlAcknowledged", peerHandle: peerHandle, messageID: envelope.messageID.uuidString, sequence: envelope.sequence))
-            case .data:
-                let duplicate = seenMessageIDs.contains(envelope.messageID)
-                remember(envelope.messageID)
-                if !duplicate {
-                    emit(.init(
-                        type: "controlReceived",
-                        peerHandle: peerHandle,
-                        messageID: envelope.messageID.uuidString,
-                        sequence: envelope.sequence,
-                        payloadBase64: envelope.payload?.base64EncodedString(),
-                        fields: ["duplicate": "false"]
-                    ))
-                }
-                if envelope.requiresAck {
-                    let ack = WireEnvelope(
-                        kind: .ack,
-                        messageID: envelope.messageID,
-                        sequence: envelope.sequence,
-                        createdAtMillis: Self.nowMillis,
-                        ttlMillis: 15_000,
-                        requiresAck: false,
-                        payload: nil
-                    )
-                    try? transmit(ack, to: peerHandle)
-                }
-            }
-        } catch {
-            emit(.init(type: "transportError", peerHandle: peerHandle, error: String(describing: error)))
-        }
+    private func receive(_ packet: Data, from peerHandle: UInt64) {
+        emit(.packetReceived(handle: peerHandle, packet: packet))
     }
 
-    private func remember(_ id: UUID) {
-        guard seenMessageIDs.insert(id).inserted else { return }
-        seenMessageOrder.append(id)
-        if seenMessageOrder.count > 1_024 {
-            for old in seenMessageOrder.prefix(256) { seenMessageIDs.remove(old) }
-            seenMessageOrder.removeFirst(256)
-        }
+    private func emit(_ event: TcBluetoothEvent) {
+        eventSink(event)
     }
 
-    private func purgeAssemblies() {
-        let cutoff = Date.now.addingTimeInterval(-30)
-        assemblies = assemblies.filter { $0.value.createdAt >= cutoff }
+    private func fail(
+        requestID: String? = nil,
+        code: String,
+        message: String,
+        retryable: Bool
+    ) {
+        emit(.failed(
+            requestID: requestID,
+            code: code,
+            message: message,
+            retryable: retryable
+        ))
     }
 
-    private func emit(_ event: Event) {
-        do { eventSink(try JSONEncoder().encode(event)) }
-        catch { /* Event consists only of JSON-safe values. */ }
-    }
-
-    private static var nowMillis: UInt64 { UInt64(max(0, Date.now.timeIntervalSince1970 * 1_000)) }
-
-    private static func fragment(_ data: Data, messageID: UUID, maximumPacketSize: Int) throws -> [Data] {
-        let headerSize = 23
-        guard maximumPacketSize > headerSize else { throw BackendError.mtuTooSmall }
-        let chunkSize = maximumPacketSize - headerSize
-        let count = max(1, Int(ceil(Double(data.count) / Double(chunkSize))))
-        guard count <= Int(UInt16.max) else { throw BackendError.controlPayloadTooLarge }
-        return (0..<count).map { index in
-            var packet = Data([0x54, 0x43, 1])
-            var rawUUID = messageID.uuid
-            withUnsafeBytes(of: &rawUUID) { packet.append(contentsOf: $0) }
-            packet.appendUInt16(UInt16(index))
-            packet.appendUInt16(UInt16(count))
-            let start = index * chunkSize
-            packet.append(data.subdata(in: start..<min(start + chunkSize, data.count)))
-            return packet
-        }
-    }
-
-    private static func parseFragment(_ data: Data) throws -> (messageID: UUID, index: UInt16, total: UInt16, payload: Data) {
-        guard data.count >= 23, data[0] == 0x54, data[1] == 0x43, data[2] == 1 else { throw BackendError.invalidFragment }
-        let uuidBytes = [UInt8](data[3..<19])
-        let tuple: uuid_t = (
-            uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
-            uuidBytes[4], uuidBytes[5], uuidBytes[6], uuidBytes[7],
-            uuidBytes[8], uuidBytes[9], uuidBytes[10], uuidBytes[11],
-            uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]
-        )
-        let index = UInt16(data[19]) << 8 | UInt16(data[20])
-        let total = UInt16(data[21]) << 8 | UInt16(data[22])
-        guard total > 0, index < total else { throw BackendError.invalidFragment }
-        return (UUID(uuid: tuple), index, total, data.subdata(in: 23..<data.count))
-    }
-
-    private enum BackendError: Error, CustomStringConvertible {
-        case invalidField(String), controlPayloadTooLarge, peerUnavailable, mtuTooSmall, invalidFragment, protocolVersion
+    fileprivate enum BackendError: Error, CustomStringConvertible {
+        case packetTooLarge, peerUnavailable, mtuTooSmall
         var description: String {
             switch self {
-            case let .invalidField(name): "invalid field: \(name)"
-            case .controlPayloadTooLarge: "BLE control payload exceeds 4096 bytes"
+            case .packetTooLarge: "BLE packet exceeds the advertised platform packet limit"
             case .peerUnavailable: "requested BLE peer is unavailable"
             case .mtuTooSmall: "negotiated BLE MTU is too small"
-            case .invalidFragment: "invalid BLE fragment"
-            case .protocolVersion: "unsupported BLE control protocol version"
             }
+        }
+    }
+}
+
+private extension Error {
+    var isRetryableBluetoothError: Bool {
+        guard let error = self as? TcBluetoothAppleBackend.BackendError else { return false }
+        switch error {
+        case .peerUnavailable, .mtuTooSmall:
+            return true
+        case .packetTooLarge:
+            return false
         }
     }
 }
 
 extension TcBluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        emit(.init(type: "centralStateChanged", fields: ["state": String(describing: central.state)]))
         guard isRunning, central.state == .poweredOn else { return }
         central.scanForPeripherals(withServices: [Self.serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
@@ -432,7 +355,6 @@ extension TcBluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
         let handle = handle(for: peripheral.identifier)
         peripherals[handle] = peripheral
         peripheral.delegate = self
-        emit(.init(type: "peerAdvertisement", peerHandle: handle, fields: ["rssi": RSSI.stringValue]))
         if peripheral.state == .disconnected {
             central.connect(peripheral, options: [CBConnectPeripheralOptionEnableAutoReconnect: true])
         }
@@ -444,20 +366,29 @@ extension TcBluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
         peripheral.delegate = self
         peripheral.discoverServices([Self.serviceUUID])
         // The ACL is not yet a bidirectional application channel. Rust only
-        // receives `peerReady` after GATT discovery and notify subscription.
-        emit(.init(type: "gattLinkConnected", peerHandle: handle))
+        // receives `connected` after GATT discovery and notify subscription.
     }
 
     public func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: (any Error)?) {
-        emit(.init(type: "peerConnectionFailed", peerHandle: handle(for: peripheral.identifier), error: String(describing: error)))
+        let handle = handle(for: peripheral.identifier)
+        fail(
+            requestID: pendingConnectRequests.removeValue(forKey: handle),
+            code: "peerConnectionFailed",
+            message: error.map(String.init(describing:)) ?? "CoreBluetooth failed to connect",
+            retryable: true
+        )
     }
 
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, timestamp: CFAbsoluteTime, isReconnecting: Bool, error: (any Error)?) {
         let handle = handle(for: peripheral.identifier)
         writableCharacteristics.removeValue(forKey: handle)
         pendingCentralWrites.removeValue(forKey: handle)
+        readyHandles.remove(handle)
         if !isReconnecting { peripherals.removeValue(forKey: handle) }
-        emit(.init(type: "peerDisconnected", peerHandle: handle, fields: ["reconnecting": String(isReconnecting)], error: error.map(String.init(describing:))))
+        emit(.disconnected(
+            handle: handle,
+            reason: error.map(String.init(describing:)) ?? (isReconnecting ? "reconnecting" : "disconnected")
+        ))
     }
 
     public func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
@@ -468,14 +399,19 @@ extension TcBluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
             peripheral.delegate = self
             if peripheral.state == .connected { peripheral.discoverServices([Self.serviceUUID]) }
         }
-        emit(.init(type: "stateRestored", fields: ["role": "central", "peerCount": String(restored.count)]))
     }
 }
 
 extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: (any Error)?) {
         guard error == nil else {
-            emit(.init(type: "gattError", peerHandle: handle(for: peripheral.identifier), error: String(describing: error)))
+            let handle = handle(for: peripheral.identifier)
+            fail(
+                requestID: pendingConnectRequests.removeValue(forKey: handle),
+                code: "gattError",
+                message: error.map(String.init(describing:)) ?? "service discovery failed",
+                retryable: true
+            )
             return
         }
         for service in peripheral.services ?? [] where service.uuid == Self.serviceUUID {
@@ -485,7 +421,13 @@ extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralDelegate {
 
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: (any Error)?) {
         guard error == nil else {
-            emit(.init(type: "gattError", peerHandle: handle(for: peripheral.identifier), error: String(describing: error)))
+            let handle = handle(for: peripheral.identifier)
+            fail(
+                requestID: pendingConnectRequests.removeValue(forKey: handle),
+                code: "gattError",
+                message: error.map(String.init(describing:)) ?? "characteristic discovery failed",
+                retryable: true
+            )
             return
         }
         let handle = handle(for: peripheral.identifier)
@@ -498,19 +440,28 @@ extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralDelegate {
     public func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic, error: (any Error)?) {
         let handle = handle(for: peripheral.identifier)
         guard error == nil else {
-            emit(.init(type: "gattError", peerHandle: handle, error: String(describing: error)))
+            fail(
+                requestID: pendingConnectRequests.removeValue(forKey: handle),
+                code: "gattError",
+                message: error.map(String.init(describing:)) ?? "notification subscription failed",
+                retryable: true
+            )
             return
         }
         guard characteristic.uuid == Self.controlUUID, characteristic.isNotifying else { return }
-        emit(.init(type: "peerReady", peerHandle: handle))
+        markReady(handle)
     }
 
     public func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: (any Error)?) {
         guard error == nil, let value = characteristic.value else {
-            emit(.init(type: "gattError", peerHandle: handle(for: peripheral.identifier), error: String(describing: error)))
+            fail(
+                code: "gattError",
+                message: error.map(String.init(describing:)) ?? "characteristic update had no value",
+                retryable: true
+            )
             return
         }
-        ingest(value, from: handle(for: peripheral.identifier))
+        receive(value, from: handle(for: peripheral.identifier))
     }
 
     public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
@@ -520,39 +471,42 @@ extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralDelegate {
 
 extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
-        emit(.init(type: "peripheralStateChanged", fields: ["state": String(describing: peripheral.state)]))
         guard isRunning, peripheral.state == .poweredOn else { return }
         configurePeripheralService()
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didAdd service: CBService, error: (any Error)?) {
         guard error == nil else {
-            emit(.init(type: "gattError", error: String(describing: error)))
+            fail(
+                code: "gattError",
+                message: error.map(String.init(describing:)) ?? "failed to publish BLE service",
+                retryable: true
+            )
             return
         }
         if !peripheral.isAdvertising {
             peripheral.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]])
         }
-        emit(.init(type: "advertisingStarted"))
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         let handle = handle(for: central.identifier)
         subscribedCentrals[handle] = central
-        emit(.init(type: "peerReady", peerHandle: handle, fields: ["role": "subscribedCentral"]))
+        markReady(handle)
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didUnsubscribeFrom characteristic: CBCharacteristic) {
         let handle = handle(for: central.identifier)
         subscribedCentrals.removeValue(forKey: handle)
-        emit(.init(type: "peerDisconnected", peerHandle: handle, fields: ["role": "subscribedCentral"]))
+        readyHandles.remove(handle)
+        emit(.disconnected(handle: handle, reason: "subscription ended"))
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         for request in requests {
             let handle = handle(for: request.central.identifier)
             if request.characteristic.uuid == Self.controlUUID, let value = request.value {
-                ingest(value, from: handle)
+                receive(value, from: handle)
                 peripheral.respond(to: request, withResult: .success)
             } else {
                 peripheral.respond(to: request, withResult: .requestNotSupported)
@@ -579,61 +533,5 @@ extension TcBluetoothAppleBackend: @preconcurrency CBPeripheralManagerDelegate {
                 .compactMap { $0 as? CBMutableCharacteristic }
                 .first { $0.uuid == Self.controlUUID }
         }
-        emit(.init(type: "stateRestored", fields: ["role": "peripheral"]))
-    }
-}
-
-private extension Data {
-    mutating func appendUInt16(_ value: UInt16) {
-        append(UInt8((value >> 8) & 0xff))
-        append(UInt8(value & 0xff))
-    }
-}
-
-// MARK: - Module-private C ABI
-
-public typealias BluetoothCEventCallback = @convention(c) (UnsafePointer<UInt8>?, Int, UInt) -> Void
-
-private final class BluetoothCallbackBox: @unchecked Sendable {
-    let callback: BluetoothCEventCallback
-    let context: UInt
-    init(callback: @escaping BluetoothCEventCallback, context: UInt) { self.callback = callback; self.context = context }
-    @MainActor func send(_ data: Data) {
-        data.withUnsafeBytes { bytes in callback(bytes.bindMemory(to: UInt8.self).baseAddress, data.count, context) }
-    }
-}
-
-private final class BluetoothHandleSource: @unchecked Sendable {
-    static let shared = BluetoothHandleSource()
-    private let lock = NSLock()
-    private var next: UInt64 = 1
-    func allocate() -> UInt64 { lock.withLock { defer { next &+= 1 }; return next } }
-}
-
-@MainActor private enum BluetoothRuntime {
-    static var backends: [UInt64: TcBluetoothAppleBackend] = [:]
-}
-
-@_cdecl("tc_bluetooth_apple_create")
-public func tc_bluetooth_apple_create(_ callback: BluetoothCEventCallback?, _ context: UInt) -> UInt64 {
-    guard let callback else { return 0 }
-    let handle = BluetoothHandleSource.shared.allocate()
-    let box = BluetoothCallbackBox(callback: callback, context: context)
-    Task { @MainActor in BluetoothRuntime.backends[handle] = TcBluetoothAppleBackend(eventSink: box.send) }
-    return handle
-}
-
-@_cdecl("tc_bluetooth_apple_submit")
-public func tc_bluetooth_apple_submit(_ handle: UInt64, _ bytes: UnsafePointer<UInt8>?, _ length: Int) -> Bool {
-    guard length >= 0, length == 0 || bytes != nil else { return false }
-    let data = length == 0 ? Data() : Data(bytes: bytes!, count: length)
-    Task { @MainActor in BluetoothRuntime.backends[handle]?.submit(data) }
-    return true
-}
-
-@_cdecl("tc_bluetooth_apple_destroy")
-public func tc_bluetooth_apple_destroy(_ handle: UInt64) {
-    Task { @MainActor in
-        BluetoothRuntime.backends.removeValue(forKey: handle)?.shutdown()
     }
 }

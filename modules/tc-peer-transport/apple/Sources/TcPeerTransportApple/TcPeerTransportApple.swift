@@ -1,71 +1,89 @@
-import CryptoKit
 import Foundation
 @preconcurrency import Network
 @preconcurrency import Security
 
-public typealias TcPeerTransportEventSink = @Sendable (Data) -> Void
+public enum TcPeerTransportChannel: Int, Sendable, Equatable {
+    case control = 1
+    case event = 2
+    case chunk = 3
+    case audio = 4
+}
+
+public enum TcPeerTransportConnectionSource: Sendable, Equatable {
+    case inbound
+    case outbound
+}
+
+public enum TcPeerTransportEvent: Sendable, Equatable {
+    case discoveryStarted(requestID: String)
+    case discoveryStopped(requestID: String)
+    case peerFound(peerID: String)
+    case connectionOpened(
+        connection: UInt64,
+        source: TcPeerTransportConnectionSource,
+        expectedPeerID: String?
+    )
+    case disconnected(connection: UInt64, reason: String)
+    case frameReceived(
+        connection: UInt64,
+        channel: TcPeerTransportChannel,
+        bytes: [UInt8]
+    )
+    case sent(requestID: String)
+    case failed(requestID: String?, code: String, message: String, retryable: Bool)
+}
+
+public typealias TcPeerTransportEventSink = @Sendable (TcPeerTransportEvent) -> Void
+
+/// Platform capability values exposed without leaking Network.framework objects.
+public struct TcPeerTransportCapabilitySnapshot: Sendable, Equatable {
+    public let localOnly: Bool
+    public let peerToPeer: Bool
+    public let authenticatedStreams: Bool
+    public let bulkStreams: Bool
+    public let realtimeStreams: Bool
+    public let maxDataFrameBytes: UInt32
+
+    public init(
+        localOnly: Bool,
+        peerToPeer: Bool,
+        authenticatedStreams: Bool,
+        bulkStreams: Bool,
+        realtimeStreams: Bool,
+        maxDataFrameBytes: UInt32
+    ) {
+        self.localOnly = localOnly
+        self.peerToPeer = peerToPeer
+        self.authenticatedStreams = authenticatedStreams
+        self.bulkStreams = bulkStreams
+        self.realtimeStreams = realtimeStreams
+        self.maxDataFrameBytes = maxDataFrameBytes
+    }
+}
 
 /// iOS 26 Bonjour/AWDL transport using Network.framework's structured-concurrency API.
-/// TLV type 1 is control, 2 is an immutable event, 3 is a resource chunk, and 4 is audio.
+/// Rust owns the meaning and contents of every TLV frame.
 public actor TcPeerTransportAppleBackend {
-    public enum Channel: Int, Sendable {
-        case control = 1
-        case event = 2
-        case chunk = 3
-        case audio = 4
-    }
-
     private static let serviceType = "_tc-travel._tcp"
 
-    private struct Command: Decodable, Sendable {
-        var type: String
-        var requestID: String?
-        var localPeerID: String?
-        var groupID: String?
-        var displayName: String?
-        var protocolVersion: UInt16?
-        var groupKeyBase64: String?
-        var identityPKCS12Base64: String?
-        var identityPassword: String?
-        var certificateDERBase64: String?
-        var privateKeyPKCS8Base64: String?
-        var peerHandle: UInt64?
-        var channel: String?
-        var payloadBase64: String?
-        var realtime: Bool?
-    }
-
-    private struct Event: Encodable, Sendable {
-        var type: String
-        var requestID: String?
-        var peerHandle: UInt64?
-        var peerID: String?
-        var channel: String?
-        var payloadBase64: String?
-        var fields: [String: String]?
-        var error: String?
-    }
-
-    private struct Hello: Codable, Sendable {
-        var kind = "hello"
-        var protocolVersion: UInt16
-        var peerID: UUID
-        var groupID: String
-        var displayName: String
-        var nonce: UUID
-        var authenticationTag: Data
+    public nonisolated static var capabilitySnapshot: TcPeerTransportCapabilitySnapshot {
+        TcPeerTransportCapabilitySnapshot(
+            localOnly: true,
+            peerToPeer: true,
+            authenticatedStreams: true,
+            bulkStreams: true,
+            realtimeStreams: true,
+            maxDataFrameBytes: 8 * 1_024 * 1_024
+        )
     }
 
     private struct Configuration: @unchecked Sendable {
         var localPeerID: UUID
-        var groupID: String
+        var discoveryScope: String
         var displayName: String
         var protocolVersion: UInt16
-        var groupKey: SymmetricKey
         var identity: sec_identity_t
     }
-
-    private enum Source: String, Sendable { case listener, bonjour }
 
     private let eventSink: TcPeerTransportEventSink
     private var configuration: Configuration?
@@ -77,87 +95,113 @@ public actor TcPeerTransportAppleBackend {
     private var endpointKeys: Set<String> = []
     private var discoveredEndpointKeys: Set<String> = []
     private var endpointKeyByConnectionID: [String: String] = [:]
-    private var sourceByConnectionID: [String: Source] = [:]
-    private var connectionsByPeer: [UUID: NetworkConnection<TLV>] = [:]
-    private var peerByConnectionID: [String: UUID] = [:]
-    private var peerHandleByID: [UUID: UInt64] = [:]
-    private var peerIDByHandle: [UInt64: UUID] = [:]
-    private var nextPeerHandle: UInt64 = 1
+    private var connectionsByHandle: [UInt64: NetworkConnection<TLV>] = [:]
+    private var handleByConnectionID: [String: UInt64] = [:]
+    private var nextConnectionHandle: UInt64 = 1
 
     public init(eventSink: @escaping TcPeerTransportEventSink) {
         self.eventSink = eventSink
     }
 
-    public func submit(_ json: Data) {
-        let command: Command
+    public func startDiscovery(
+        requestID: String,
+        localPeerID: String,
+        discoveryScope: String,
+        displayName: String,
+        protocolVersion: UInt16,
+        certificateDER: [UInt8],
+        privateKeyPKCS8: [UInt8]
+    ) async {
         do {
-            command = try JSONDecoder().decode(Command.self, from: json)
-        } catch {
-            emit(.init(type: "commandFailed", error: String(describing: error)))
-            return
-        }
-        switch command.type {
-        case "start":
-            Task { await self.start(command) }
-        case "stop":
-            Task { await self.stop(requestID: command.requestID) }
-        case "send":
-            Task { await self.send(command) }
-        case "setRealtime":
-            Task { await self.setRealtime(command.realtime ?? false, requestID: command.requestID) }
-        case "snapshot": snapshot(requestID: command.requestID)
-        default: emit(.init(type: "commandFailed", requestID: command.requestID, error: "unknown command: \(command.type)"))
-        }
-    }
-
-    public func shutdown() async { await stop(requestID: nil) }
-
-    private func start(_ command: Command) async {
-        do {
-            let config = try Self.makeConfiguration(command)
+            let config = try Self.makeConfiguration(
+                localPeerID: localPeerID,
+                discoveryScope: discoveryScope,
+                displayName: displayName,
+                protocolVersion: protocolVersion,
+                certificateDER: certificateDER,
+                privateKeyPKCS8: privateKeyPKCS8
+            )
             await resetNetworkTasks(reason: "transportRestarted")
             configuration = config
             running = true
             startListener()
             startBrowser()
-            emit(.init(type: "commandCompleted", requestID: command.requestID, fields: [
-                "command": "start",
-                "serviceType": Self.serviceType,
-                "peerToPeerIncluded": "true",
-                "localOnly": "true",
-                "protocolVersion": String(config.protocolVersion),
-            ]))
+            emit(.discoveryStarted(requestID: requestID))
         } catch let error as BackendError {
             switch error {
             case .invalidIdentity, .identityImportFailed, .certificateImportFailed, .privateKeyImportFailed:
-                emit(.init(
-                    type: "capabilityBlocked",
-                    requestID: command.requestID,
-                    fields: [
-                        "reason": "tlsIdentityUnavailable",
-                        "tlsPurpose": "encryptionOnly",
-                        "peerAuthentication": "firstFrameGroupHMACThenBusinessAEAD",
-                    ],
-                    error: error.description
+                emit(.failed(
+                    requestID: requestID,
+                    code: "tlsIdentityUnavailable",
+                    message: error.description,
+                    retryable: false
                 ))
             default:
-                emit(.init(type: "commandFailed", requestID: command.requestID, error: error.description))
+                emit(.failed(
+                    requestID: requestID,
+                    code: "commandFailed",
+                    message: error.description,
+                    retryable: true
+                ))
             }
         } catch {
-            emit(.init(type: "commandFailed", requestID: command.requestID, error: String(describing: error)))
+            emit(.failed(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error),
+                retryable: true
+            ))
         }
     }
 
-    private func stop(requestID: String?) async {
-        running = false
-        await resetNetworkTasks(reason: "transportStopped")
-        configuration = nil
-        emit(.init(type: "commandCompleted", requestID: requestID, fields: ["command": "stop"]))
+    public func stopDiscovery(requestID: String) async {
+        await stop(requestID: requestID)
     }
 
-    private func setRealtime(_ enabled: Bool, requestID: String?) async {
+    /// Discovery owns the sole connection direction; this is an idempotent hint.
+    public func connect(requestID: String, peerID: String) {
+        guard UUID(uuidString: peerID) != nil else {
+            emit(.failed(
+                requestID: requestID,
+                code: "commandFailed",
+                message: "peerID is invalid",
+                retryable: false
+            ))
+            return
+        }
+    }
+
+    public func disconnect(requestID: String, connection: UInt64) {
+        guard let networkConnection = connectionsByHandle[connection] else {
+            emit(.failed(
+                requestID: requestID,
+                code: "commandFailed",
+                message: "connection is unavailable",
+                retryable: false
+            ))
+            return
+        }
+        connectionTasks[networkConnection.id]?.cancel()
+        emit(.sent(requestID: requestID))
+    }
+
+    public func sendFrame(
+        requestID: String,
+        connection: UInt64,
+        channel: TcPeerTransportChannel,
+        bytes: [UInt8]
+    ) async {
+        await send(
+            requestID: requestID,
+            connectionHandle: connection,
+            channel: channel,
+            payload: Data(bytes)
+        )
+    }
+
+    public func setRealtime(requestID: String, realtime enabled: Bool) async {
         guard realtime != enabled else {
-            emit(.init(type: "commandCompleted", requestID: requestID, fields: ["command": "setRealtime", "reused": "true"]))
+            emit(.sent(requestID: requestID))
             return
         }
         realtime = enabled
@@ -166,10 +210,18 @@ public actor TcPeerTransportAppleBackend {
             startListener()
             startBrowser()
         }
-        emit(.init(type: "trafficClassChanged", requestID: requestID, fields: [
-            "realtime": String(enabled),
-            "serviceClass": enabled ? "interactiveVoice" : "bestEffort",
-        ]))
+        emit(.sent(requestID: requestID))
+    }
+
+    public func shutdown() async { await stop(requestID: nil) }
+
+    private func stop(requestID: String?) async {
+        running = false
+        await resetNetworkTasks(reason: "transportStopped")
+        configuration = nil
+        if let requestID {
+            emit(.discoveryStopped(requestID: requestID))
+        }
     }
 
     private func startListener() {
@@ -196,7 +248,7 @@ public actor TcPeerTransportAppleBackend {
                     Task { await self.listenerStateChanged(state) }
                 }
                 try await listener.run { connection in
-                    await self.attach(connection, source: .listener, endpoint: nil, expectedPeerID: nil)
+                    await self.attach(connection, source: .inbound, endpoint: nil, expectedPeerID: nil)
                 }
             } catch is CancellationError {
                 return
@@ -230,23 +282,20 @@ public actor TcPeerTransportAppleBackend {
 
     private func discovered(_ endpoints: [Bonjour.Endpoint]) {
         guard let config = configuration else { return }
-        var accepted = 0
         var available: Set<String> = []
         for endpoint in endpoints {
-            guard endpoint.txtRecord["gid"] == config.groupID,
+            guard endpoint.txtRecord["gid"] == config.discoveryScope,
                   endpoint.txtRecord["v"] == String(config.protocolVersion),
                   let peerText = endpoint.txtRecord["peer"],
                   let peerID = UUID(uuidString: peerText),
                   peerID != config.localPeerID
             else { continue }
-            accepted += 1
             available.insert(endpoint.id)
             // Exactly one side dials: the lexicographically smaller stable peer ID.
             guard config.localPeerID.uuidString < peerID.uuidString else { continue }
             connect(endpoint, expectedPeerID: peerID)
         }
         discoveredEndpointKeys = available
-        emit(.init(type: "discoveryUpdated", fields: ["matchingPeerCount": String(accepted)]))
     }
 
     private func connect(_ endpoint: Bonjour.Endpoint, expectedPeerID: UUID) {
@@ -263,17 +312,16 @@ public actor TcPeerTransportAppleBackend {
             .noProxiesPreferred(true)
         )
         endpointKeyByConnectionID[connection.id] = endpoint.id
-        emit(.init(type: "dialStarted", peerID: expectedPeerID.uuidString, fields: ["endpointID": endpoint.id]))
-        attach(connection, source: .bonjour, endpoint: endpoint, expectedPeerID: expectedPeerID)
+        emit(.peerFound(peerID: expectedPeerID.uuidString.lowercased()))
+        attach(connection, source: .outbound, endpoint: endpoint, expectedPeerID: expectedPeerID)
     }
 
     private func attach(
         _ connection: NetworkConnection<TLV>,
-        source: Source,
+        source: TcPeerTransportConnectionSource,
         endpoint: Bonjour.Endpoint?,
         expectedPeerID: UUID?
     ) {
-        sourceByConnectionID[connection.id] = source
         let task = Task { [weak self] in
             guard let self else { return }
             await self.handle(connection, source: source, endpoint: endpoint, expectedPeerID: expectedPeerID)
@@ -283,77 +331,47 @@ public actor TcPeerTransportAppleBackend {
 
     private func handle(
         _ connection: NetworkConnection<TLV>,
-        source: Source,
+        source: TcPeerTransportConnectionSource,
         endpoint: Bonjour.Endpoint?,
         expectedPeerID: UUID?
     ) async {
-        guard let config = configuration else { return }
+        guard configuration != nil else { return }
         connection.onStateUpdate { _, state in
             Task { self.connectionStateChanged(connection, state: state) }
         }
         connection.onPathUpdate { _, path in
             Task { self.pathChanged(connection, path: path) }
         }
+        let handle = connectionHandle(connection)
+        connectionsByHandle[handle] = connection
+        emit(.connectionOpened(
+            connection: handle,
+            source: source,
+            expectedPeerID: expectedPeerID?.uuidString.lowercased()
+        ))
         var shouldRetry = false
         do {
-            let nonce = UUID()
-            let hello = Hello(
-                protocolVersion: config.protocolVersion,
-                peerID: config.localPeerID,
-                groupID: config.groupID,
-                displayName: config.displayName,
-                nonce: nonce,
-                authenticationTag: Self.authenticationTag(
-                    key: config.groupKey,
-                    protocolVersion: config.protocolVersion,
-                    peerID: config.localPeerID,
-                    groupID: config.groupID,
-                    displayName: config.displayName,
-                    nonce: nonce
-                )
-            )
-            try await connection.send(JSONEncoder().encode(hello), type: Channel.control.rawValue)
-            var authenticatedPeer: UUID?
             for try await (payload, metadata) in connection.messages {
                 try Task.checkCancellation()
-                if authenticatedPeer == nil {
-                    guard metadata.type == Channel.control.rawValue else { throw BackendError.businessBeforeAuthentication }
-                    let remote = try JSONDecoder().decode(Hello.self, from: payload)
-                    try Self.validate(remote, config: config)
-                    if let expectedPeerID, remote.peerID != expectedPeerID {
-                        throw BackendError.unexpectedPeerIdentity
-                    }
-                    let expectedSource: Source = config.localPeerID.uuidString < remote.peerID.uuidString ? .bonjour : .listener
-                    guard source == expectedSource else { throw BackendError.duplicateDirection }
-                    if let existing = connectionsByPeer[remote.peerID], existing.id != connection.id {
-                        connectionTasks[existing.id]?.cancel()
-                    }
-                    authenticatedPeer = remote.peerID
-                    connectionsByPeer[remote.peerID] = connection
-                    peerByConnectionID[connection.id] = remote.peerID
-                    let handle = peerHandle(remote.peerID)
-                    emit(.init(type: "peerConnected", peerHandle: handle, peerID: remote.peerID.uuidString, fields: [
-                        "displayName": remote.displayName,
-                        "source": source.rawValue,
-                        "authenticated": "true",
-                    ]))
-                    continue
+                guard let channel = TcPeerTransportChannel(rawValue: metadata.type) else {
+                    throw BackendError.invalidTLVType
                 }
-                guard let peerID = authenticatedPeer, let channel = Channel(rawValue: metadata.type) else { throw BackendError.invalidTLVType }
-                emit(.init(
-                    type: "frameReceived",
-                    peerHandle: peerHandle(peerID),
-                    peerID: peerID.uuidString,
-                    channel: Self.channelName(channel),
-                    payloadBase64: payload.base64EncodedString(),
-                    fields: ["byteCount": String(payload.count)]
+                emit(.frameReceived(
+                    connection: handle,
+                    channel: channel,
+                    bytes: [UInt8](payload)
                 ))
             }
         } catch is CancellationError {
             // Normal shutdown/reconfiguration.
         } catch {
-            shouldRetry = source == .bonjour
-            emit(.init(type: "connectionFailed", peerID: peerByConnectionID[connection.id]?.uuidString, error: String(describing: error)))
+            shouldRetry = source == .outbound
+            emit(.failed(
+                requestID: nil,
+                code: "connectionFailed",
+                message: String(describing: error),
+                retryable: shouldRetry
+            ))
         }
         remove(connection, endpointKey: endpoint?.id)
         if shouldRetry, let endpoint, let expectedPeerID {
@@ -374,40 +392,42 @@ public actor TcPeerTransportAppleBackend {
         connect(endpoint, expectedPeerID: expectedPeerID)
     }
 
-    private func send(_ command: Command) async {
+    private func send(
+        requestID: String,
+        connectionHandle: UInt64,
+        channel: TcPeerTransportChannel,
+        payload: Data
+    ) async {
         do {
-            guard let handle = command.peerHandle, let peerID = peerIDByHandle[handle], let connection = connectionsByPeer[peerID] else {
+            guard let connection = connectionsByHandle[connectionHandle] else {
                 throw BackendError.peerUnavailable
             }
-            guard let name = command.channel, let channel = Self.channel(named: name) else { throw BackendError.invalidTLVType }
-            guard let encoded = command.payloadBase64, let payload = Data(base64Encoded: encoded) else { throw BackendError.invalidPayload }
             let limit = channel == .chunk ? 8 * 1_024 * 1_024 : 512 * 1_024
             guard payload.count <= limit else { throw BackendError.payloadTooLarge }
             try await connection.send(payload, type: channel.rawValue)
-            emit(.init(type: "frameSent", requestID: command.requestID, peerHandle: handle, peerID: peerID.uuidString, channel: name, fields: ["byteCount": String(payload.count)]))
+            emit(.sent(requestID: requestID))
         } catch {
-            emit(.init(type: "commandFailed", requestID: command.requestID, peerHandle: command.peerHandle, error: String(describing: error)))
+            emit(.failed(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error),
+                retryable: true
+            ))
         }
     }
 
     private func remove(_ connection: NetworkConnection<TLV>, endpointKey: String?) {
         connectionTasks.removeValue(forKey: connection.id)
-        if let peerID = peerByConnectionID.removeValue(forKey: connection.id), connectionsByPeer[peerID]?.id == connection.id {
-            connectionsByPeer.removeValue(forKey: peerID)
-            emit(.init(type: "peerDisconnected", peerHandle: peerHandleByID[peerID], peerID: peerID.uuidString))
+        if let handle = handleByConnectionID.removeValue(forKey: connection.id) {
+            connectionsByHandle.removeValue(forKey: handle)
+            emit(.disconnected(connection: handle, reason: "disconnected"))
         }
-        sourceByConnectionID.removeValue(forKey: connection.id)
         if let key = endpointKey ?? endpointKeyByConnectionID.removeValue(forKey: connection.id) { endpointKeys.remove(key) }
     }
 
     private func resetNetworkTasks(reason: String) async {
-        for (peerID, _) in connectionsByPeer {
-            emit(.init(
-                type: "peerDisconnected",
-                peerHandle: peerHandleByID[peerID],
-                peerID: peerID.uuidString,
-                error: reason
-            ))
+        for handle in connectionsByHandle.keys {
+            emit(.disconnected(connection: handle, reason: reason))
         }
         listenerTask?.cancel()
         browserTask?.cancel()
@@ -418,113 +438,85 @@ public actor TcPeerTransportAppleBackend {
         endpointKeys.removeAll()
         discoveredEndpointKeys.removeAll()
         endpointKeyByConnectionID.removeAll()
-        sourceByConnectionID.removeAll()
-        connectionsByPeer.removeAll()
-        peerByConnectionID.removeAll()
+        connectionsByHandle.removeAll()
+        handleByConnectionID.removeAll()
         await Task.yield()
     }
 
-    private func peerHandle(_ peerID: UUID) -> UInt64 {
-        if let existing = peerHandleByID[peerID] { return existing }
-        let handle = nextPeerHandle
-        nextPeerHandle &+= 1
-        peerHandleByID[peerID] = handle
-        peerIDByHandle[handle] = peerID
+    private func connectionHandle(_ connection: NetworkConnection<TLV>) -> UInt64 {
+        if let existing = handleByConnectionID[connection.id] { return existing }
+        let handle = nextConnectionHandle
+        nextConnectionHandle &+= 1
+        handleByConnectionID[connection.id] = handle
         return handle
     }
 
-    private func snapshot(requestID: String?) {
-        emit(.init(type: "capabilitySnapshot", requestID: requestID, fields: [
-            "running": String(running),
-            "peerToPeerIncluded": "true",
-            "localOnly": "true",
-            "bonjourServiceType": Self.serviceType,
-            "authenticatedPeerCount": String(connectionsByPeer.count),
-            "realtime": String(realtime),
-            "serviceClass": realtime ? "interactiveVoice" : "bestEffort",
-            "framing": "TLV(UInt8,UInt32)",
-        ]))
-    }
-
     private func listenerStateChanged(_ state: NetworkListener<TLV>.State) {
-        emit(.init(type: "listenerStateChanged", fields: ["state": String(describing: state)]))
+        _ = state
     }
 
     private func browserStateChanged(_ state: NetworkBrowser<Bonjour>.State) {
-        emit(.init(type: "browserStateChanged", fields: ["state": String(describing: state)]))
+        _ = state
     }
 
     private func connectionStateChanged(_ connection: NetworkConnection<TLV>, state: NetworkChannel<TLV>.State) {
-        emit(.init(type: "connectionStateChanged", peerID: peerByConnectionID[connection.id]?.uuidString, fields: [
-            "connectionID": connection.id,
-            "state": String(describing: state),
-        ]))
+        _ = connection
+        _ = state
     }
 
     private func pathChanged(_ connection: NetworkConnection<TLV>, path: NWPath) {
-        let interfaces = path.availableInterfaces.map(\.name).sorted()
-        emit(.init(type: "pathChanged", peerID: peerByConnectionID[connection.id]?.uuidString, fields: [
-            "status": String(describing: path.status),
-            "interfaces": interfaces.joined(separator: ","),
-            "awdlObserved": String(interfaces.contains { $0.lowercased().contains("awdl") }),
-            "usesWiFi": String(path.usesInterfaceType(.wifi)),
-            "localOnly": "true",
-        ]))
+        _ = connection
+        _ = path
     }
 
     private func transportFailed(_ component: String, error: any Error) {
-        emit(.init(type: "transportFailed", fields: ["component": component], error: String(describing: error)))
+        emit(.failed(
+            requestID: nil,
+            code: "transportFailed",
+            message: "\(component): \(error)",
+            retryable: true
+        ))
     }
 
-    private func emit(_ event: Event) {
-        if let data = try? JSONEncoder().encode(event) { eventSink(data) }
+    private func emit(_ event: TcPeerTransportEvent) {
+        eventSink(event)
     }
 
-    private nonisolated static func makeConfiguration(_ command: Command) throws -> Configuration {
-        guard let localText = command.localPeerID, let localPeerID = UUID(uuidString: localText) else { throw BackendError.invalidPeerID }
-        guard let groupID = command.groupID, !groupID.isEmpty else { throw BackendError.invalidGroupID }
-        guard let displayName = command.displayName, !displayName.isEmpty else { throw BackendError.invalidDisplayName }
-        guard let groupText = command.groupKeyBase64, let groupData = Data(base64Encoded: groupText), groupData.count >= 32 else { throw BackendError.invalidGroupKey }
-        let identity = try importIdentity(command)
+    private nonisolated static func makeConfiguration(
+        localPeerID localText: String,
+        discoveryScope: String,
+        displayName: String,
+        protocolVersion: UInt16,
+        certificateDER: [UInt8],
+        privateKeyPKCS8: [UInt8]
+    ) throws -> Configuration {
+        guard let localPeerID = UUID(uuidString: localText) else { throw BackendError.invalidPeerID }
+        guard !discoveryScope.isEmpty else { throw BackendError.invalidDiscoveryScope }
+        guard !displayName.isEmpty else { throw BackendError.invalidDisplayName }
+        let identity = try importIdentity(
+            certificateDER: certificateDER,
+            privateKeyPKCS8: privateKeyPKCS8
+        )
         return Configuration(
             localPeerID: localPeerID,
-            groupID: groupID,
+            discoveryScope: discoveryScope,
             displayName: String(displayName.prefix(63)),
-            protocolVersion: command.protocolVersion ?? 1,
-            groupKey: SymmetricKey(data: groupData),
+            protocolVersion: protocolVersion,
             identity: identity
         )
     }
 
-    private nonisolated static func importIdentity(_ command: Command) throws -> sec_identity_t {
-        if let identityText = command.identityPKCS12Base64 {
-            guard let identityData = Data(base64Encoded: identityText) else { throw BackendError.invalidIdentity }
-            return try importIdentity(pkcs12: identityData, password: command.identityPassword ?? "")
+    private nonisolated static func importIdentity(
+        certificateDER: [UInt8],
+        privateKeyPKCS8: [UInt8]
+    ) throws -> sec_identity_t {
+        guard !certificateDER.isEmpty, !privateKeyPKCS8.isEmpty else {
+            throw BackendError.invalidIdentity
         }
-        guard let certificateText = command.certificateDERBase64,
-              let certificateData = Data(base64Encoded: certificateText),
-              let privateKeyText = command.privateKeyPKCS8Base64,
-              let privateKeyData = Data(base64Encoded: privateKeyText)
-        else { throw BackendError.invalidIdentity }
-        return try importIdentity(certificateDER: certificateData, privateKeyPKCS8: privateKeyData)
-    }
-
-    private nonisolated static func importIdentity(pkcs12: Data, password: String) throws -> sec_identity_t {
-        let options = [kSecImportExportPassphrase as String: password]
-        var items: CFArray?
-        let status = SecPKCS12Import(pkcs12 as CFData, options as CFDictionary, &items)
-        guard status == errSecSuccess,
-              let values = items as? [[String: Any]],
-              let identityValue = values.first?[kSecImportItemIdentity as String]
-        else { throw BackendError.identityImportFailed(status) }
-        let identity = identityValue as CFTypeRef
-        guard CFGetTypeID(identity) == SecIdentityGetTypeID() else {
-            throw BackendError.identityImportFailed(errSecDecode)
-        }
-        guard let protocolIdentity = sec_identity_create(identity as! SecIdentity) else {
-            throw BackendError.identityImportFailed(errSecDecode)
-        }
-        return protocolIdentity
+        return try importIdentity(
+            certificateDER: Data(certificateDER),
+            privateKeyPKCS8: Data(privateKeyPKCS8)
+        )
     }
 
     private nonisolated static func importIdentity(
@@ -652,15 +644,15 @@ public actor TcPeerTransportAppleBackend {
             .localIdentity(identity)
             .peerAuthentication(.none)
             .applicationProtocols(["travel-companion/1"])
-            // The certificate only provides encryption. The mandatory first TLV authenticates
-            // group membership with an HMAC over stable peer/group identity and a nonce.
+            // The certificate provides channel encryption. Rust authenticates
+            // the first opaque control frame before surfacing the connection.
             .certificateValidator { _, _ in true }
         }
     }
 
     private nonisolated static func txtRecord(_ config: Configuration) -> NWTXTRecord {
         NWTXTRecord([
-            "gid": config.groupID,
+            "gid": config.discoveryScope,
             "peer": config.localPeerID.uuidString,
             "name": config.displayName,
             "v": String(config.protocolVersion),
@@ -675,142 +667,23 @@ public actor TcPeerTransportAppleBackend {
         return parameters
     }
 
-    private nonisolated static func authenticationTag(
-        key: SymmetricKey,
-        protocolVersion: UInt16,
-        peerID: UUID,
-        groupID: String,
-        displayName: String,
-        nonce: UUID
-    ) -> Data {
-        let input = authenticationInput(
-            protocolVersion: protocolVersion,
-            peerID: peerID,
-            groupID: groupID,
-            displayName: displayName,
-            nonce: nonce
-        )
-        return Data(HMAC<SHA256>.authenticationCode(for: input, using: key))
-    }
-
-    private nonisolated static func authenticationInput(
-        protocolVersion: UInt16,
-        peerID: UUID,
-        groupID: String,
-        displayName: String,
-        nonce: UUID
-    ) -> Data {
-        Data("\(protocolVersion)|\(peerID.uuidString)|\(groupID)|\(displayName)|\(nonce.uuidString)".utf8)
-    }
-
-    private nonisolated static func validate(_ hello: Hello, config: Configuration) throws {
-        guard hello.kind == "hello", hello.protocolVersion == config.protocolVersion else { throw BackendError.protocolVersion }
-        guard hello.groupID == config.groupID, hello.peerID != config.localPeerID else { throw BackendError.groupAuthenticationFailed }
-        let input = authenticationInput(
-            protocolVersion: hello.protocolVersion,
-            peerID: hello.peerID,
-            groupID: hello.groupID,
-            displayName: hello.displayName,
-            nonce: hello.nonce
-        )
-        guard HMAC<SHA256>.isValidAuthenticationCode(
-            hello.authenticationTag,
-            authenticating: input,
-            using: config.groupKey
-        ) else { throw BackendError.groupAuthenticationFailed }
-    }
-
-    private nonisolated static func channel(named value: String) -> Channel? {
-        switch value {
-        case "control": .control
-        case "event": .event
-        case "chunk": .chunk
-        case "audio": .audio
-        default: nil
-        }
-    }
-
-    private nonisolated static func channelName(_ value: Channel) -> String {
-        switch value {
-        case .control: "control"
-        case .event: "event"
-        case .chunk: "chunk"
-        case .audio: "audio"
-        }
-    }
-
     private enum BackendError: Error, CustomStringConvertible {
-        case invalidPeerID, invalidGroupID, invalidDisplayName, invalidGroupKey, invalidIdentity
+        case invalidPeerID, invalidDiscoveryScope, invalidDisplayName, invalidIdentity
         case identityImportFailed(OSStatus), certificateImportFailed, privateKeyImportFailed(String)
-        case businessBeforeAuthentication, groupAuthenticationFailed
-        case duplicateDirection, unexpectedPeerIdentity, protocolVersion, invalidTLVType, peerUnavailable, invalidPayload, payloadTooLarge
+        case invalidTLVType, peerUnavailable, payloadTooLarge
         var description: String {
             switch self {
             case .invalidPeerID: "localPeerID must be a UUID"
-            case .invalidGroupID: "groupID is required"
+            case .invalidDiscoveryScope: "discoveryScope is required"
             case .invalidDisplayName: "displayName is required"
-            case .invalidGroupKey: "groupKeyBase64 must contain at least 32 bytes"
-            case .invalidIdentity: "provide identityPKCS12Base64 or both certificateDERBase64 and privateKeyPKCS8Base64"
+            case .invalidIdentity: "certificateDer and privateKeyPkcs8 are required"
             case let .identityImportFailed(status): "PKCS#12 identity import failed (OSStatus \(status))"
             case .certificateImportFailed: "certificate DER import failed or its public-key attributes are unavailable"
             case let .privateKeyImportFailed(message): "PKCS#8 private-key import failed: \(message)"
-            case .businessBeforeAuthentication: "business TLV received before authenticated hello"
-            case .groupAuthenticationFailed: "peer group authentication failed"
-            case .duplicateDirection: "connection violates stable peer-ID dial direction"
-            case .unexpectedPeerIdentity: "authenticated hello peerID does not match the discovered Bonjour endpoint"
-            case .protocolVersion: "protocol version mismatch"
             case .invalidTLVType: "TLV channel must be control, event, chunk, or audio"
-            case .peerUnavailable: "peerHandle is not connected"
-            case .invalidPayload: "invalid payloadBase64"
+            case .peerUnavailable: "connection is not connected"
             case .payloadTooLarge: "payload exceeds per-frame safety limit"
             }
         }
     }
-}
-
-// MARK: - Module-private C ABI
-
-public typealias PeerTransportCEventCallback = @convention(c) (UnsafePointer<UInt8>?, Int, UInt) -> Void
-private final class PeerTransportCallbackBox: @unchecked Sendable {
-    let callback: PeerTransportCEventCallback
-    let context: UInt
-    init(callback: @escaping PeerTransportCEventCallback, context: UInt) { self.callback = callback; self.context = context }
-    func send(_ data: Data) { data.withUnsafeBytes { callback($0.bindMemory(to: UInt8.self).baseAddress, data.count, context) } }
-}
-private final class PeerTransportHandleSource: @unchecked Sendable {
-    static let shared = PeerTransportHandleSource()
-    private let lock = NSLock()
-    private var next: UInt64 = 1
-    func allocate() -> UInt64 { lock.withLock { defer { next &+= 1 }; return next } }
-}
-private final class PeerTransportRegistry: @unchecked Sendable {
-    static let shared = PeerTransportRegistry()
-    private let lock = NSLock()
-    private var values: [UInt64: TcPeerTransportAppleBackend] = [:]
-    func insert(_ value: TcPeerTransportAppleBackend, for handle: UInt64) { lock.withLock { values[handle] = value } }
-    func get(_ handle: UInt64) -> TcPeerTransportAppleBackend? { lock.withLock { values[handle] } }
-    func remove(_ handle: UInt64) -> TcPeerTransportAppleBackend? { lock.withLock { values.removeValue(forKey: handle) } }
-}
-
-@_cdecl("tc_peer_transport_apple_create")
-public func tc_peer_transport_apple_create(_ callback: PeerTransportCEventCallback?, _ context: UInt) -> UInt64 {
-    guard let callback else { return 0 }
-    let handle = PeerTransportHandleSource.shared.allocate()
-    let box = PeerTransportCallbackBox(callback: callback, context: context)
-    PeerTransportRegistry.shared.insert(TcPeerTransportAppleBackend(eventSink: box.send), for: handle)
-    return handle
-}
-
-@_cdecl("tc_peer_transport_apple_submit")
-public func tc_peer_transport_apple_submit(_ handle: UInt64, _ bytes: UnsafePointer<UInt8>?, _ length: Int) -> Bool {
-    guard let backend = PeerTransportRegistry.shared.get(handle), length >= 0, length == 0 || bytes != nil else { return false }
-    let data = length == 0 ? Data() : Data(bytes: bytes!, count: length)
-    Task { await backend.submit(data) }
-    return true
-}
-
-@_cdecl("tc_peer_transport_apple_destroy")
-public func tc_peer_transport_apple_destroy(_ handle: UInt64) {
-    guard let backend = PeerTransportRegistry.shared.remove(handle) else { return }
-    Task { await backend.shutdown() }
 }

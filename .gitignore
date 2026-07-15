@@ -1,6 +1,8 @@
 .DS_Store
 DerivedData/
 build/
+.build/
+/bindings/tc-app-ffi/generated
 target/
 *.xcuserstate
 xcuserdata/

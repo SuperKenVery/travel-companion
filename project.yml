@@ -35,7 +35,7 @@ settings:
     SUPPORTED_PLATFORMS: iphoneos
     HEADER_SEARCH_PATHS:
       - "$(inherited)"
-      - "$(SRCROOT)/bindings/tc-app-ffi/include"
+      - "$(SRCROOT)/bindings/tc-app-ffi/generated"
 
 targets:
   TravelCompanion:
@@ -43,6 +43,9 @@ targets:
     platform: iOS
     sources:
       - path: app-ios/TravelCompanion
+      - path: bindings/tc-app-ffi/generated
+        includes:
+          - "*.swift"
     resources:
       - path: app-ios/TravelCompanion/Resources
     dependencies:
@@ -69,7 +72,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: app-ios/TravelCompanion/Core/TravelCompanion-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
-          - "$(SRCROOT)/bindings/tc-app-ffi/include"
+          - "$(SRCROOT)/bindings/tc-app-ffi/generated"
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/build/ios/$(CONFIGURATION)"

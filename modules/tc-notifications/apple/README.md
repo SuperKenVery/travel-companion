@@ -1,17 +1,12 @@
 # TcNotificationsApple
 
-Private UserNotifications backend. Reusing a notification identifier implements coalescing.
-Starting installs the backend as `UNUserNotificationCenterDelegate`, so notification presentation
-and user actions are returned as module events.
+Private UserNotifications backend. Reusing a merge key implements coalescing. Construction installs
+the backend as `UNUserNotificationCenterDelegate`, so user actions return to the module; shutdown
+restores the prior delegate. Cold-start lifecycle code can pass string `userInfo` to
+`handleNotificationResponse(userInfo:)` so notification opens use the same semantic event path.
 
-Commands use `type` and `requestID?`: `start`, `requestAuthorization`, `settings`, `removeAll`;
-`remove` adds `identifier?` or `identifiers?`; `schedule` adds `identifier`, `title?`, `subtitle?`,
-`body?`, `categoryIdentifier?`, `threadIdentifier?`, `sound?`, `badge?`, `delayMillis?`,
-`repeats?`, and string-to-string `userInfo?`. With no delay it is delivered immediately.
-
-Every event has
-`{"type":String,"requestID":String?,"identifier":String?,"actionIdentifier":String?,`<br>
-`"userInfo":{String:String}?,"fields":{String:String}?,"error":String?}`. Stable types are
-`commandCompleted`, `commandFailed`, `authorizationResult`, `capabilitySnapshot`,
-`notificationScheduled`, `notificationPresented`, `notificationResponse`, and
-`notificationsRemoved`. The app must bootstrap this backend early enough to receive responses.
+The public capability boundary is typed. The backend exposes `requestAuthorization`, `schedule`,
+and `cancel` methods and emits `TcNotificationsEvent` values through its event sink;
+`TcNotificationAuthorization` represents the platform authorization state. Semantic identifiers
+and deep links remain ordinary strings across the boundary. No command/event JSON or
+`UserNotifications` object crosses it.

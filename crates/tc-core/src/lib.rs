@@ -1,35 +1,28 @@
 //! Application coordinator and the only Rust API consumed by the public GUI
-//! binding. Native frameworks are driven through queued module commands.
+//! binding. Native frameworks are driven through semantic queued module commands.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use tc_bluetooth::apple_wire as bluetooth_apple_wire;
-use tc_bluetooth::{BluetoothCommand, BluetoothEvent, PeerHandle};
+use tc_bluetooth::{BluetoothCommand, BluetoothControlMessage, BluetoothEvent, PeerHandle};
 use tc_call::{CallMachine, CallSignal, CallState};
-use tc_call_system::apple_wire as call_system_apple_wire;
 use tc_call_system::{CallSystemCommand, CallSystemEvent};
 use tc_crypto::{open, seal, IdentityKeypair, SealedMessage, SecretKeyMaterial};
 use tc_document::{DocumentError, DocumentRevision, DocumentState, EditorLease, LeaseEvent};
 use tc_group_auth::{JoinHello, PinHandshake, PinSession};
 use tc_im::{Conversation, MessageContent};
-use tc_location::apple_wire as location_apple_wire;
 use tc_location::{LocationCommand, LocationEvent};
 use tc_location_logic::UwbObservation;
 use tc_model::{
     CallId, DeliveryPolicy, EntityId, EventId, GroupAudience, GroupId, LeaseId, LocationSample,
     PeerId, RequestId, ResourceId, RevisionId,
 };
-use tc_notifications::apple_wire as notifications_apple_wire;
 use tc_notifications::{NotificationCommand, NotificationEvent};
-use tc_peer_transport::apple_wire as transport_apple_wire;
 use tc_peer_transport::{ConnectionHandle, TrafficClass, TransportCommand, TransportEvent};
 use tc_protocol::{encode_frame, FrameDecoder, WireMessage, PROTOCOL_VERSION};
-use tc_ranging::apple_wire as ranging_apple_wire;
 use tc_ranging::{RangingCommand, RangingEvent};
 use tc_replication::{DeliveryState, IngestReceipt, ReplicationEngine, ReplicationError};
 use tc_resources::{build_manifest, DiskResourceStore, ResourceError, ResourceManifest};
-use tc_secure_storage::apple_wire as secure_storage_apple_wire;
 use tc_secure_storage::{SecretValue, SecureStorageCommand, SecureStorageEvent};
 use tc_store::{EventStore, StoreError};
 use thiserror::Error;
@@ -773,61 +766,25 @@ impl TravelCore {
         let result = (|| {
             let module = envelope.module.as_str();
             match module {
-                "bluetooth" => {
-                    match bluetooth_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_bluetooth(event),
-                        None => Ok(()),
-                    }
-                }
-                "peerTransport" => {
-                    match transport_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_transport(event),
-                        None => Ok(()),
-                    }
-                }
-                "location" => {
-                    match location_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_location(event),
-                        None => Ok(()),
-                    }
-                }
+                "bluetooth" => self.on_bluetooth(decode_module_event(module, envelope.event)?),
+                "peerTransport" => self.on_transport(decode_module_event(module, envelope.event)?),
+                "location" => self.on_location(decode_module_event(module, envelope.event)?),
                 "ranging" => {
-                    match ranging_apple_wire::event_from_value_at(envelope.event, self.last_now_ms)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_ranging(event),
-                        None => Ok(()),
+                    let mut event: RangingEvent = decode_module_event(module, envelope.event)?;
+                    // Nearby Interaction does not timestamp measurements. Keep
+                    // receipt time under the core's injected clock so tests and
+                    // stale-state handling remain deterministic.
+                    if let RangingEvent::Measurement { observed_at_ms, .. } = &mut event {
+                        *observed_at_ms = self.last_now_ms;
                     }
+                    self.on_ranging(event)
                 }
                 "notifications" => {
-                    match notifications_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_notification(event),
-                        None => Ok(()),
-                    }
+                    self.on_notification(decode_module_event(module, envelope.event)?)
                 }
-                "callSystem" => {
-                    match call_system_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_call_system(event),
-                        None => Ok(()),
-                    }
-                }
+                "callSystem" => self.on_call_system(decode_module_event(module, envelope.event)?),
                 "secureStorage" => {
-                    match secure_storage_apple_wire::event_from_value(envelope.event)
-                        .map_err(|error| module_wire_error(module, error))?
-                    {
-                        Some(event) => self.on_secure_storage(event),
-                        None => Ok(()),
-                    }
+                    self.on_secure_storage(decode_module_event(module, envelope.event)?)
                 }
                 other => Err(CoreError::InvalidModuleEvent(format!(
                     "unknown module {other}"
@@ -2196,11 +2153,9 @@ impl TravelCore {
                     self.set_peer_connected(&peer, false);
                 }
             }
-            BluetoothEvent::ControlReceived {
-                handle,
-                control_kind,
-                payload,
-            } => self.on_control_received(handle, &control_kind, &payload)?,
+            BluetoothEvent::ControlReceived { handle, message } => {
+                self.on_control_received(handle, message)?;
+            }
             BluetoothEvent::Failed { message, .. } => self.diagnostic("bluetooth", message),
             BluetoothEvent::Started { .. }
             | BluetoothEvent::Stopped { .. }
@@ -2212,19 +2167,24 @@ impl TravelCore {
     fn on_control_received(
         &mut self,
         handle: PeerHandle,
-        kind: &str,
-        payload: &[u8],
+        message: BluetoothControlMessage,
     ) -> Result<(), CoreError> {
-        match kind {
-            "invitationInfo" => self.on_invitation_info(handle, payload)?,
-            "joinHello" => self.on_join_hello(handle, payload)?,
-            "joinResponse" => self.on_join_response(handle, payload)?,
-            "joinConfirmation" => self.on_join_confirmation(handle, payload)?,
-            "groupControl" => self.on_group_control_received(handle, payload)?,
-            _ => self.diagnostic(
-                "control",
-                format!("ignored unauthenticated BLE control {kind}"),
-            ),
+        match message {
+            BluetoothControlMessage::InvitationInfo { payload } => {
+                self.on_invitation_info(handle, &payload)?;
+            }
+            BluetoothControlMessage::JoinHello { payload } => {
+                self.on_join_hello(handle, &payload)?;
+            }
+            BluetoothControlMessage::JoinResponse { payload } => {
+                self.on_join_response(handle, &payload)?;
+            }
+            BluetoothControlMessage::JoinConfirmation { payload } => {
+                self.on_join_confirmation(handle, &payload)?;
+            }
+            BluetoothControlMessage::GroupControl { payload } => {
+                self.on_group_control_received(handle, &payload)?;
+            }
         }
         Ok(())
     }
@@ -2576,8 +2536,9 @@ impl TravelCore {
         };
         self.send_control_handle(
             handle,
-            "invitationInfo",
-            serde_json::to_vec(&invitation)?,
+            BluetoothControlMessage::InvitationInfo {
+                payload: serde_json::to_vec(&invitation)?,
+            },
             self.last_now_ms.saturating_add(300_000),
         )
     }
@@ -2613,12 +2574,13 @@ impl TravelCore {
             .ok_or(CoreError::IdentityUnavailable)?;
         self.send_control_handle(
             handle,
-            "joinHello",
-            serde_json::to_vec(&JoinHelloPayload {
-                hello,
-                display_name: self.state.identity.display_name.clone(),
-                public_key,
-            })?,
+            BluetoothControlMessage::JoinHello {
+                payload: serde_json::to_vec(&JoinHelloPayload {
+                    hello,
+                    display_name: self.state.identity.display_name.clone(),
+                    public_key,
+                })?,
+            },
             self.last_now_ms.saturating_add(120_000),
         )
     }
@@ -2706,8 +2668,9 @@ impl TravelCore {
         );
         self.send_control_handle(
             handle,
-            "joinResponse",
-            serde_json::to_vec(&response)?,
+            BluetoothControlMessage::JoinResponse {
+                payload: serde_json::to_vec(&response)?,
+            },
             self.last_now_ms.saturating_add(120_000),
         )
     }
@@ -2780,11 +2743,12 @@ impl TravelCore {
         self.pending_join_pin = None;
         self.send_control_handle(
             handle,
-            "joinConfirmation",
-            serde_json::to_vec(&JoinConfirmationPayload {
-                peer_id: self.state.identity.peer_id.clone(),
-                confirmation: session.confirmation(b"joiner").to_vec(),
-            })?,
+            BluetoothControlMessage::JoinConfirmation {
+                payload: serde_json::to_vec(&JoinConfirmationPayload {
+                    peer_id: self.state.identity.peer_id.clone(),
+                    confirmation: session.confirmation(b"joiner").to_vec(),
+                })?,
+            },
             self.last_now_ms.saturating_add(120_000),
         )?;
         self.send_group_presence(handle)?;
@@ -2869,8 +2833,7 @@ impl TravelCore {
     fn send_control_handle(
         &mut self,
         handle: PeerHandle,
-        kind: impl Into<String>,
-        payload: Vec<u8>,
+        message: BluetoothControlMessage,
         expires_at_ms: i64,
     ) -> Result<(), CoreError> {
         self.queue(
@@ -2878,8 +2841,7 @@ impl TravelCore {
             &BluetoothCommand::SendControl {
                 request_id: RequestId::new(),
                 handle,
-                control_kind: kind.into(),
-                payload,
+                message,
                 expires_at_ms,
             },
         )
@@ -2887,12 +2849,7 @@ impl TravelCore {
 
     fn on_transport(&mut self, event: TransportEvent) -> Result<(), CoreError> {
         match event {
-            TransportEvent::Connected {
-                peer_id,
-                connection,
-                ..
-            }
-            | TransportEvent::Authenticated {
+            TransportEvent::Authenticated {
                 peer_id,
                 connection,
             } => {
@@ -2966,38 +2923,6 @@ impl TravelCore {
                     self.handle_wire_message(connection, message)?;
                 }
             }
-            TransportEvent::RealtimeReceived {
-                connection,
-                stream_id,
-                sequence,
-                timestamp_ms,
-                bytes,
-            } => {
-                let Some(peer) = self.transport_peers.get(&connection) else {
-                    return Err(CoreError::InvalidModuleEvent(
-                        "realtime frame arrived on an unknown connection".into(),
-                    ));
-                };
-                let Some((call_id, call_peer_id)) = call_identity(self.call.state()) else {
-                    return Ok(());
-                };
-                if &call_peer_id != peer || stream_id != call_id.to_string() {
-                    return Ok(());
-                }
-                let audio: RealtimeAudioPayload = serde_json::from_slice(&bytes)?;
-                self.queue(
-                    "callSystem",
-                    &CallSystemCommand::PlayAudio {
-                        request_id: RequestId::new(),
-                        call_id,
-                        pcm16: audio.pcm16,
-                        sample_rate: audio.sample_rate,
-                        channel_count: audio.channel_count,
-                        sequence,
-                        timestamp_ms,
-                    },
-                )?;
-            }
             TransportEvent::Failed { message, .. } => self.diagnostic("peerTransport", message),
             TransportEvent::DiscoveryStarted { .. }
             | TransportEvent::DiscoveryStopped { .. }
@@ -3012,9 +2937,7 @@ impl TravelCore {
         connection: ConnectionHandle,
         message: WireMessage,
     ) -> Result<(), CoreError> {
-        if !self.transport_peers.contains_key(&connection)
-            && !matches!(&message, WireMessage::Authenticate { .. })
-        {
+        if !self.transport_peers.contains_key(&connection) {
             return Err(CoreError::InvalidModuleEvent(
                 "data arrived before the peer transport authenticated the group member".into(),
             ));
@@ -3124,12 +3047,37 @@ impl TravelCore {
                 chunk_index,
                 &bytes,
             )?,
-            WireMessage::RealtimeFrame { .. } => {
-                self.diagnostic("call", "received a realtime frame on the data channel");
-            }
-            WireMessage::Authenticate { .. } => {
-                // The Apple transport has already authenticated the mandatory
-                // group hello before surfacing this connection.
+            WireMessage::RealtimeFrame {
+                stream_id,
+                sequence,
+                timestamp_ms,
+                bytes,
+                ..
+            } => {
+                let Some(peer) = self.transport_peers.get(&connection) else {
+                    return Err(CoreError::InvalidModuleEvent(
+                        "realtime frame arrived on an unknown connection".into(),
+                    ));
+                };
+                let Some((call_id, call_peer_id)) = call_identity(self.call.state()) else {
+                    return Ok(());
+                };
+                if &call_peer_id != peer || stream_id != call_id.to_string() {
+                    return Ok(());
+                }
+                let audio: RealtimeAudioPayload = serde_json::from_slice(&bytes)?;
+                self.queue(
+                    "callSystem",
+                    &CallSystemCommand::PlayAudio {
+                        request_id: RequestId::new(),
+                        call_id,
+                        pcm16: audio.pcm16,
+                        sample_rate: audio.sample_rate,
+                        channel_count: audio.channel_count,
+                        sequence,
+                        timestamp_ms,
+                    },
+                )?;
             }
         }
         Ok(())
@@ -3532,11 +3480,10 @@ impl TravelCore {
                     return Ok(());
                 }
                 if let Some(connection) = self.transport_connections.get(&peer_id).copied() {
-                    self.queue(
-                        "peerTransport",
-                        &TransportCommand::SendRealtime {
-                            request_id: RequestId::new(),
-                            connection,
+                    self.send_wire(
+                        connection,
+                        &WireMessage::RealtimeFrame {
+                            protocol_version: PROTOCOL_VERSION,
                             stream_id: call_id.to_string(),
                             sequence,
                             timestamp_ms,
@@ -3546,6 +3493,7 @@ impl TravelCore {
                                 channel_count,
                             })?,
                         },
+                        TrafficClass::RealtimeVoice,
                     )?;
                 }
             }
@@ -3702,7 +3650,7 @@ impl TravelCore {
             .copied()
             .collect::<Vec<_>>();
         for connection in connections {
-            self.send_wire(connection, message, traffic_class.clone())?;
+            self.send_wire(connection, message, traffic_class)?;
         }
         Ok(())
     }
@@ -3822,8 +3770,9 @@ impl TravelCore {
         };
         self.send_control_handle(
             handle,
-            "groupControl",
-            serde_json::to_vec(&envelope)?,
+            BluetoothControlMessage::GroupControl {
+                payload: serde_json::to_vec(&envelope)?,
+            },
             expires_at_ms,
         )
     }
@@ -4048,50 +3997,18 @@ impl TravelCore {
     }
 
     fn queue<T: Serialize>(&mut self, module: &str, command: &T) -> Result<(), CoreError> {
-        let semantic = serde_json::to_value(command)?;
-        let command = match module {
-            "bluetooth" => bluetooth_apple_wire::command_to_value_at(
-                &serde_json::from_value::<BluetoothCommand>(semantic)?,
-                self.last_now_ms,
-            )
-            .map_err(|error| module_wire_error(module, error))?,
-            "peerTransport" => transport_apple_wire::command_to_value(&serde_json::from_value::<
-                TransportCommand,
-            >(semantic)?)
-            .map_err(|error| module_wire_error(module, error))?,
-            "location" => location_apple_wire::command_to_value(&serde_json::from_value::<
-                LocationCommand,
-            >(semantic)?)
-            .map_err(|error| module_wire_error(module, error))?,
-            "ranging" => ranging_apple_wire::command_to_value(&serde_json::from_value::<
-                RangingCommand,
-            >(semantic)?)
-            .map_err(|error| module_wire_error(module, error))?,
-            "notifications" => {
-                notifications_apple_wire::command_to_value(&serde_json::from_value::<
-                    NotificationCommand,
-                >(semantic)?)
-                .map_err(|error| module_wire_error(module, error))?
-            }
-            "callSystem" => call_system_apple_wire::command_to_value(&serde_json::from_value::<
-                CallSystemCommand,
-            >(semantic)?)
-            .map_err(|error| module_wire_error(module, error))?,
-            "secureStorage" => {
-                secure_storage_apple_wire::command_to_value(&serde_json::from_value::<
-                    SecureStorageCommand,
-                >(semantic)?)
-                .map_err(|error| module_wire_error(module, error))?
-            }
+        match module {
+            "bluetooth" | "peerTransport" | "location" | "ranging" | "notifications"
+            | "callSystem" | "secureStorage" => {}
             other => {
                 return Err(CoreError::InvalidModuleEvent(format!(
                     "unknown module {other}"
                 )))
             }
-        };
+        }
         self.module_commands.push_back(ModuleCommandEnvelope {
             module: module.into(),
-            command,
+            command: serde_json::to_value(command)?,
         });
         Ok(())
     }
@@ -4102,8 +4019,13 @@ impl TravelCore {
     }
 }
 
-fn module_wire_error(module: &str, error: impl std::fmt::Display) -> CoreError {
-    CoreError::InvalidModuleEvent(format!("{module} Apple wire contract failed: {error}"))
+fn decode_module_event<T>(module: &str, value: Value) -> Result<T, CoreError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_value(value).map_err(|error| {
+        CoreError::InvalidModuleEvent(format!("{module} semantic event is invalid: {error}"))
+    })
 }
 
 fn command_now(command: &AppCommand) -> i64 {
@@ -4203,7 +4125,6 @@ fn call_id_from_signal(signal: &CallSignal) -> &CallId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
     use tempfile::tempdir;
 
     fn core() -> TravelCore {
@@ -4289,18 +4210,18 @@ mod tests {
     }
 
     #[test]
-    fn gui_boundary_drains_only_private_apple_wire_commands() {
+    fn module_outbox_contains_only_semantic_commands() {
         let mut core = core();
         core.dispatch(AppCommand::StartTravel { now_ms: 10 })
             .unwrap();
         for envelope in core.drain_module_commands() {
             assert!(
-                envelope.command.get("type").is_some(),
-                "{} emitted a non-Apple command: {}",
+                envelope.command.get("kind").is_some(),
+                "{} emitted an invalid semantic command: {}",
                 envelope.module,
                 envelope.command
             );
-            assert!(envelope.command.get("kind").is_none());
+            assert!(envelope.command.get("type").is_none());
         }
     }
 
@@ -4427,16 +4348,14 @@ mod tests {
             .iter()
             .find(|command| command.module == "bluetooth")
             .unwrap();
-        assert_eq!(command.command["type"], "sendControl");
-        let outer = base64::engine::general_purpose::STANDARD
-            .decode(command.command["payloadBase64"].as_str().unwrap())
-            .unwrap();
-        let outer: Value = serde_json::from_slice(&outer).unwrap();
-        assert_eq!(outer["kind"], "groupControl");
-        let envelope = base64::engine::general_purpose::STANDARD
-            .decode(outer["payloadBase64"].as_str().unwrap())
-            .unwrap();
-        let envelope: GroupControlEnvelope = serde_json::from_slice(&envelope).unwrap();
+        let command: BluetoothCommand = serde_json::from_value(command.command.clone()).unwrap();
+        let BluetoothCommand::SendControl { message, .. } = command else {
+            panic!("expected semantic send-control command")
+        };
+        let BluetoothControlMessage::GroupControl { payload } = message else {
+            panic!("expected typed group-control message")
+        };
+        let envelope: GroupControlEnvelope = serde_json::from_slice(&payload).unwrap();
         let plaintext = open(
             &SecretKeyMaterial(core.group_key.unwrap()),
             &envelope.sealed,

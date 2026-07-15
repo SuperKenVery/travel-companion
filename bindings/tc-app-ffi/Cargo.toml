@@ -8,12 +8,29 @@ rust-version.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+tc-bluetooth = { path = "../../modules/tc-bluetooth" }
+tc-call-system = { path = "../../modules/tc-call-system" }
 tc-core = { path = "../../crates/tc-core" }
+tc-location = { path = "../../modules/tc-location" }
 tc-location-logic = { path = "../../crates/tc-location-logic" }
 tc-model = { path = "../../crates/tc-model" }
+tc-notifications = { path = "../../modules/tc-notifications" }
+tc-peer-transport = { path = "../../modules/tc-peer-transport" }
+tc-ranging = { path = "../../modules/tc-ranging" }
+tc-secure-storage = { path = "../../modules/tc-secure-storage" }
+thiserror.workspace = true
+uniffi.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

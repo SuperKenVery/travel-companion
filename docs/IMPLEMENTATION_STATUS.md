@@ -124,7 +124,7 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 ## 自动化证据的边界
 
-正式 workspace 当前包含 Rust 单元测试，覆盖模型、密码学、PAKE、存储、复制、资源、定位、IM、文档、通话、capability fake backend、core 与 GUI FFI；iOS 测试 target 目前只有 command 编码、资源进度与空快照 round-trip 等模型测试。
+正式 workspace 当前包含 Rust 单元测试，覆盖模型、密码学、PAKE、存储、复制、资源、定位、IM、文档、通话、capability fake backend、core 与 GUI UniFFI；七个 fake 都通过与 Swift 相同的 foreign `Backend` trait 验证 typed capability snapshot、逐项 operation methods 与 typed `EventSink`，binding 测试还覆盖 sink 先注册再派发初始操作、操作栈内同步回调重入不死锁和幂等 shutdown。iOS 测试 target 目前只有 command 编码、资源进度与空快照 round-trip 等模型测试。
 
 标准入口是：
 

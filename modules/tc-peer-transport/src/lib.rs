@@ -1,15 +1,33 @@
-//! Local-only peer data/realtime transport capability. Bonjour, AWDL and
-//! Network.framework endpoints never cross this Rust boundary.
+//! Local-only peer transport capability.
+//!
+//! Bonjour, TLS and Network.framework objects remain native. Group
+//! authentication, connection admission and all application framing remain in
+//! Rust; the native backend only opens scoped connections and moves opaque TLV
+//! frames on integer handles.
 
+mod ffi;
+
+pub use ffi::{PeerTransportBackend, PeerTransportBackendError, PeerTransportEventSink};
+
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use sha2::Sha256;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, Weak};
 use tc_model::{GroupId, PeerId, RequestId};
+use uuid::Uuid;
+
+const HELLO_MAGIC: &[u8; 4] = b"TCPH";
+const HELLO_TAG_BYTES: usize = 32;
+const DISCOVERY_SCOPE_LABEL: &[u8] = b"tc-peer-discovery-v1";
+
+type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct ConnectionHandle(pub u64);
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct TransportCapabilities {
     pub local_only: bool,
@@ -20,12 +38,30 @@ pub struct TransportCapabilities {
     pub max_data_frame_bytes: u32,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, uniffi::Enum)]
 #[serde(rename_all = "camelCase")]
 pub enum TrafficClass {
     EnergyEfficient,
     Bulk,
     RealtimeVoice,
+}
+
+/// Opaque TLV channel selected by Rust and implemented by the native
+/// Network.framework backend.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "camelCase")]
+pub enum TransportChannel {
+    Control,
+    Event,
+    Chunk,
+    Audio,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, uniffi::Enum)]
+#[serde(rename_all = "camelCase")]
+pub enum TransportConnectionSource {
+    Inbound,
+    Outbound,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -62,14 +98,6 @@ pub enum TransportCommand {
         bytes: Vec<u8>,
         traffic_class: TrafficClass,
     },
-    SendRealtime {
-        request_id: RequestId,
-        connection: ConnectionHandle,
-        stream_id: String,
-        sequence: u64,
-        timestamp_ms: i64,
-        bytes: Vec<u8>,
-    },
     SetRealtime {
         request_id: RequestId,
         realtime: bool,
@@ -92,11 +120,6 @@ pub enum TransportEvent {
     PeerFound {
         peer_id: PeerId,
     },
-    Connected {
-        request_id: RequestId,
-        peer_id: PeerId,
-        connection: ConnectionHandle,
-    },
     Authenticated {
         connection: ConnectionHandle,
         peer_id: PeerId,
@@ -107,13 +130,6 @@ pub enum TransportEvent {
     },
     DataReceived {
         connection: ConnectionHandle,
-        bytes: Vec<u8>,
-    },
-    RealtimeReceived {
-        connection: ConnectionHandle,
-        stream_id: String,
-        sequence: u64,
-        timestamp_ms: i64,
         bytes: Vec<u8>,
     },
     Sent {
@@ -127,41 +143,88 @@ pub enum TransportEvent {
     },
 }
 
-pub trait PeerTransportBackend: Send {
-    fn capabilities(&self) -> TransportCapabilities;
-    fn submit(&mut self, command: TransportCommand);
-    fn poll_event(&mut self) -> Option<TransportEvent>;
+/// Commands visible to the native backend and its fake. The discovery scope
+/// is an opaque HMAC-derived token, never the product group ID or group key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransportBackendCommand {
+    StartDiscovery {
+        request_id: RequestId,
+        local_peer_id: PeerId,
+        discovery_scope: String,
+        display_name: String,
+        protocol_version: u16,
+        certificate_der: Vec<u8>,
+        private_key_pkcs8: Vec<u8>,
+    },
+    StopDiscovery {
+        request_id: RequestId,
+    },
+    Connect {
+        request_id: RequestId,
+        peer_id: PeerId,
+    },
+    Disconnect {
+        request_id: RequestId,
+        connection: ConnectionHandle,
+    },
+    SendFrame {
+        request_id: RequestId,
+        connection: ConnectionHandle,
+        channel: TransportChannel,
+        bytes: Vec<u8>,
+    },
+    SetRealtime {
+        request_id: RequestId,
+        realtime: bool,
+    },
 }
 
-pub struct PeerTransport<B: PeerTransportBackend> {
-    backend: B,
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransportBackendEvent {
+    DiscoveryStarted {
+        request_id: RequestId,
+    },
+    DiscoveryStopped {
+        request_id: RequestId,
+    },
+    PeerFound {
+        peer_id: PeerId,
+    },
+    ConnectionOpened {
+        connection: ConnectionHandle,
+        source: TransportConnectionSource,
+        expected_peer_id: Option<PeerId>,
+    },
+    Disconnected {
+        connection: ConnectionHandle,
+        reason: String,
+    },
+    FrameReceived {
+        connection: ConnectionHandle,
+        channel: TransportChannel,
+        bytes: Vec<u8>,
+    },
+    Sent {
+        request_id: RequestId,
+    },
+    Failed {
+        request_id: Option<RequestId>,
+        code: String,
+        message: String,
+        retryable: bool,
+    },
 }
 
-impl<B: PeerTransportBackend> PeerTransport<B> {
-    #[must_use]
-    pub fn new(backend: B) -> Self {
-        Self { backend }
-    }
-
-    #[must_use]
-    pub fn capabilities(&self) -> TransportCapabilities {
-        self.backend.capabilities()
-    }
-
-    pub fn submit(&mut self, command: TransportCommand) {
-        self.backend.submit(command);
-    }
-
-    pub fn poll_event(&mut self) -> Option<TransportEvent> {
-        self.backend.poll_event()
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct FakePeerTransportBackend {
     capabilities: TransportCapabilities,
-    commands: Vec<TransportCommand>,
-    events: VecDeque<TransportEvent>,
+    state: Mutex<FakePeerTransportState>,
+}
+
+#[derive(Default)]
+struct FakePeerTransportState {
+    commands: Vec<TransportBackendCommand>,
+    event_sink: Option<Arc<PeerTransportEventSink>>,
+    is_shutdown: bool,
 }
 
 impl Default for FakePeerTransportBackend {
@@ -175,95 +238,208 @@ impl Default for FakePeerTransportBackend {
                 realtime_streams: true,
                 max_data_frame_bytes: 8 * 1024 * 1024,
             },
-            commands: Vec::new(),
-            events: VecDeque::new(),
+            state: Mutex::new(FakePeerTransportState::default()),
         }
     }
 }
 
 impl FakePeerTransportBackend {
-    pub fn inject(&mut self, event: TransportEvent) {
-        self.events.push_back(event);
+    pub fn inject(&self, event: TransportBackendEvent) -> Result<(), PeerTransportBackendError> {
+        let sink = {
+            let state = self.state.lock().map_err(|_| backend_state_poisoned())?;
+            if state.is_shutdown {
+                return Err(backend_is_shutdown());
+            }
+            state
+                .event_sink
+                .clone()
+                .ok_or_else(|| backend_error("peer transport event sink is not attached"))?
+        };
+        sink.emit(event);
+        Ok(())
+    }
+
+    fn record(&self, command: TransportBackendCommand) -> Result<(), PeerTransportBackendError> {
+        let mut state = self.state.lock().map_err(|_| backend_state_poisoned())?;
+        if state.is_shutdown {
+            return Err(backend_is_shutdown());
+        }
+        state.commands.push(command);
+        Ok(())
     }
 
     #[must_use]
-    pub fn commands(&self) -> &[TransportCommand] {
-        &self.commands
+    pub fn commands(&self) -> Vec<TransportBackendCommand> {
+        self.state
+            .lock()
+            .expect("fake peer transport state poisoned")
+            .commands
+            .clone()
     }
 }
 
 impl PeerTransportBackend for FakePeerTransportBackend {
-    fn capabilities(&self) -> TransportCapabilities {
-        self.capabilities.clone()
+    fn capabilities(&self) -> Result<TransportCapabilities, PeerTransportBackendError> {
+        Ok(self.capabilities.clone())
     }
 
-    fn submit(&mut self, command: TransportCommand) {
-        self.commands.push(command);
+    fn attach_event_sink(
+        &self,
+        event_sink: Arc<PeerTransportEventSink>,
+    ) -> Result<(), PeerTransportBackendError> {
+        let mut state = self.state.lock().map_err(|_| backend_state_poisoned())?;
+        if state.is_shutdown {
+            return Err(backend_is_shutdown());
+        }
+        state.event_sink = Some(event_sink);
+        Ok(())
     }
 
-    fn poll_event(&mut self) -> Option<TransportEvent> {
-        self.events.pop_front()
+    #[allow(clippy::too_many_arguments)]
+    fn start_discovery(
+        &self,
+        request_id: String,
+        local_peer_id: String,
+        discovery_scope: String,
+        display_name: String,
+        protocol_version: u16,
+        certificate_der: Vec<u8>,
+        private_key_pkcs8: Vec<u8>,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::StartDiscovery {
+            request_id: RequestId::from_string(request_id),
+            local_peer_id: PeerId::from_string(local_peer_id),
+            discovery_scope,
+            display_name,
+            protocol_version,
+            certificate_der,
+            private_key_pkcs8,
+        })
+    }
+
+    fn stop_discovery(&self, request_id: String) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::StopDiscovery {
+            request_id: RequestId::from_string(request_id),
+        })
+    }
+
+    fn connect(
+        &self,
+        request_id: String,
+        peer_id: String,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::Connect {
+            request_id: RequestId::from_string(request_id),
+            peer_id: PeerId::from_string(peer_id),
+        })
+    }
+
+    fn disconnect(
+        &self,
+        request_id: String,
+        connection: u64,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::Disconnect {
+            request_id: RequestId::from_string(request_id),
+            connection: ConnectionHandle(connection),
+        })
+    }
+
+    fn send_frame(
+        &self,
+        request_id: String,
+        connection: u64,
+        channel: TransportChannel,
+        bytes: Vec<u8>,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::SendFrame {
+            request_id: RequestId::from_string(request_id),
+            connection: ConnectionHandle(connection),
+            channel,
+            bytes,
+        })
+    }
+
+    fn set_realtime(
+        &self,
+        request_id: String,
+        realtime: bool,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.record(TransportBackendCommand::SetRealtime {
+            request_id: RequestId::from_string(request_id),
+            realtime,
+        })
+    }
+
+    fn shutdown(&self) -> Result<(), PeerTransportBackendError> {
+        let mut state = self.state.lock().map_err(|_| backend_state_poisoned())?;
+        state.is_shutdown = true;
+        state.event_sink = None;
+        Ok(())
     }
 }
 
-/// Adapter for the private JSON contract implemented by `TcPeerTransportApple`.
-pub mod apple_wire {
-    use super::{ConnectionHandle, TrafficClass, TransportCommand, TransportEvent};
-    use base64::Engine as _;
-    use serde::{Deserialize, Serialize};
-    use serde_json::{json, Value};
-    use std::collections::BTreeMap;
-    use std::fmt::{Display, Formatter};
-    use tc_model::{PeerId, RequestId};
+#[derive(Clone)]
+struct TransportConfiguration {
+    local_peer_id: PeerId,
+    group_id: GroupId,
+    display_name: String,
+    protocol_version: u16,
+    group_key: Vec<u8>,
+}
 
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct AppleWireError(String);
+struct PeerSession {
+    source: TransportConnectionSource,
+    expected_peer_id: Option<PeerId>,
+    authenticated_peer_id: Option<PeerId>,
+}
 
-    impl AppleWireError {
-        fn new(message: impl Into<String>) -> Self {
-            Self(message.into())
-        }
+type TransportHandler = Arc<dyn Fn(TransportEvent) + Send + Sync + 'static>;
+
+#[derive(Default)]
+struct PeerTransportRuntimeState {
+    configuration: Option<TransportConfiguration>,
+    sessions: HashMap<ConnectionHandle, PeerSession>,
+    connections_by_peer: HashMap<PeerId, ConnectionHandle>,
+    internal_requests: HashSet<RequestId>,
+    handler: Option<TransportHandler>,
+}
+
+/// Rust-side runtime between semantic transport commands and the raw native
+/// frame backend. It terminates the group-authenticated hello protocol.
+pub struct PeerTransportRuntime {
+    backend: Arc<dyn PeerTransportBackend>,
+    state: Mutex<PeerTransportRuntimeState>,
+}
+
+impl PeerTransportRuntime {
+    #[must_use]
+    pub fn new(backend: Arc<dyn PeerTransportBackend>) -> Arc<Self> {
+        Arc::new(Self {
+            backend,
+            state: Mutex::new(PeerTransportRuntimeState::default()),
+        })
     }
 
-    impl Display for AppleWireError {
-        fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str(&self.0)
-        }
+    pub fn attach_event_handler(
+        self: &Arc<Self>,
+        handler: TransportHandler,
+    ) -> Result<(), PeerTransportBackendError> {
+        self.state
+            .lock()
+            .map_err(|_| backend_state_poisoned())?
+            .handler = Some(handler);
+        let weak = Arc::downgrade(self);
+        self.backend
+            .attach_event_sink(PeerTransportEventSink::new(Arc::new(move |event| {
+                if let Some(runtime) = Weak::upgrade(&weak) {
+                    runtime.handle_backend_event(event);
+                }
+            })))
     }
 
-    impl std::error::Error for AppleWireError {}
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AppleEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        #[serde(rename = "requestID")]
-        request_id: Option<String>,
-        peer_handle: Option<u64>,
-        #[serde(rename = "peerID")]
-        peer_id: Option<String>,
-        channel: Option<String>,
-        payload_base64: Option<String>,
-        #[serde(default)]
-        fields: BTreeMap<String, String>,
-        error: Option<String>,
-    }
-
-    #[derive(Deserialize, Serialize)]
-    #[serde(rename_all = "camelCase")]
-    struct RealtimePayload {
-        #[serde(rename = "streamID")]
-        stream_id: String,
-        sequence: u64,
-        timestamp_millis: i64,
-        payload_base64: String,
-    }
-
-    /// Converts a semantic transport command to the complete Apple private
-    /// command, including the per-installation DER TLS identity on start.
-    pub fn command_to_value(command: &TransportCommand) -> Result<Value, AppleWireError> {
-        let value = match command {
+    pub fn dispatch(&self, command: TransportCommand) -> Result<(), PeerTransportBackendError> {
+        match command {
             TransportCommand::StartDiscovery {
                 request_id,
                 local_peer_id,
@@ -274,299 +450,662 @@ pub mod apple_wire {
                 certificate_der,
                 private_key_pkcs8,
             } => {
-                if group_key.len() < 32 {
-                    return Err(AppleWireError::new(
-                        "group_key must contain at least 32 bytes",
-                    ));
-                }
-                if certificate_der.is_empty() || private_key_pkcs8.is_empty() {
-                    return Err(AppleWireError::new(
-                        "a unique certificate DER and PKCS#8 private key are required",
-                    ));
-                }
-                json!({
-                    "type": "start",
-                    "requestID": request_to_apple(request_id)?,
-                    "localPeerID": canonical_uuid(local_peer_id.as_str())?,
-                    "groupID": group_id.as_str(),
-                    "displayName": display_name,
-                    "protocolVersion": protocol_version,
-                    "groupKeyBase64": encode(group_key),
-                    "certificateDERBase64": encode(certificate_der),
-                    "privateKeyPKCS8Base64": encode(private_key_pkcs8),
-                })
+                validate_configuration(&display_name, &group_key)?;
+                let discovery_scope = discovery_scope(&group_key)?;
+                self.state
+                    .lock()
+                    .map_err(|_| backend_state_poisoned())?
+                    .reset_for_configuration(TransportConfiguration {
+                        local_peer_id: local_peer_id.clone(),
+                        group_id,
+                        display_name: display_name.clone(),
+                        protocol_version,
+                        group_key,
+                    });
+                self.backend.start_discovery(
+                    request_id.to_string(),
+                    local_peer_id.to_string(),
+                    discovery_scope,
+                    display_name,
+                    protocol_version,
+                    certificate_der,
+                    private_key_pkcs8,
+                )
             }
-            TransportCommand::StopDiscovery { request_id } => json!({
-                "type": "stop",
-                "requestID": request_to_apple(request_id)?,
-            }),
-            // Discovery/start automatically chooses the sole connection direction
-            // from stable UUID ordering. There is no imperative Apple connect.
-            TransportCommand::Connect { request_id, .. } => json!({
-                "type": "snapshot",
-                "requestID": request_to_apple(request_id)?,
-            }),
-            TransportCommand::Disconnect { .. } => {
-                return Err(AppleWireError::new(
-                    "TcPeerTransportApple owns connection lifetime; per-peer disconnect is unsupported",
-                ));
+            TransportCommand::StopDiscovery { request_id } => {
+                self.backend.stop_discovery(request_id.to_string())
             }
+            TransportCommand::Connect {
+                request_id,
+                peer_id,
+            } => self
+                .backend
+                .connect(request_id.to_string(), peer_id.to_string()),
+            TransportCommand::Disconnect {
+                request_id,
+                connection,
+            } => self
+                .backend
+                .disconnect(request_id.to_string(), connection.0),
             TransportCommand::SendData {
                 request_id,
                 connection,
                 bytes,
                 traffic_class,
-            } => json!({
-                "type": "send",
-                "requestID": request_to_apple(request_id)?,
-                "peerHandle": connection.0,
-                "channel": match traffic_class {
-                    TrafficClass::EnergyEfficient => "event",
-                    TrafficClass::Bulk => "chunk",
-                    TrafficClass::RealtimeVoice => "audio",
-                },
-                "payloadBase64": encode(bytes),
-            }),
-            TransportCommand::SendRealtime {
-                request_id,
-                connection,
-                stream_id,
-                sequence,
-                timestamp_ms,
+            } => self.backend.send_frame(
+                request_id.to_string(),
+                connection.0,
+                channel_for_traffic(traffic_class),
                 bytes,
-            } => {
-                let envelope = RealtimePayload {
-                    stream_id: stream_id.clone(),
-                    sequence: *sequence,
-                    timestamp_millis: *timestamp_ms,
-                    payload_base64: encode(bytes),
-                };
-                let envelope = serde_json::to_vec(&envelope)
-                    .map_err(|error| AppleWireError::new(error.to_string()))?;
-                json!({
-                    "type": "send",
-                    "requestID": request_to_apple(request_id)?,
-                    "peerHandle": connection.0,
-                    "channel": "audio",
-                    "payloadBase64": encode(&envelope),
-                })
-            }
+            ),
             TransportCommand::SetRealtime {
                 request_id,
                 realtime,
-            } => json!({
-                "type": "setRealtime",
-                "requestID": request_to_apple(request_id)?,
-                "realtime": realtime,
-            }),
-        };
-        Ok(value)
+            } => self.backend.set_realtime(request_id.to_string(), realtime),
+        }
     }
 
-    /// Converts private Network.framework callbacks to semantic transport events.
-    pub fn event_from_value(value: Value) -> Result<Option<TransportEvent>, AppleWireError> {
-        let event: AppleEvent = serde_json::from_value(value).map_err(|error| {
-            AppleWireError::new(format!("invalid PeerTransport Apple event: {error}"))
-        })?;
-        let request_id = event
-            .request_id
-            .as_deref()
-            .map(request_from_apple)
-            .transpose()?;
-        let result = match event.event_type.as_str() {
-            "commandCompleted" => match event.fields.get("command").map(String::as_str) {
-                Some("start") => Some(TransportEvent::DiscoveryStarted {
-                    request_id: required(request_id, "requestID")?,
-                }),
-                Some("stop") => Some(TransportEvent::DiscoveryStopped {
-                    request_id: required(request_id, "requestID")?,
-                }),
-                _ => None,
-            },
-            "dialStarted" => event.peer_id.map(|peer| TransportEvent::PeerFound {
-                peer_id: PeerId::from_string(peer),
-            }),
-            // peerConnected is emitted only after the TLS link's group-HMAC
-            // hello succeeds, so Authenticated is the precise semantic event.
-            "peerConnected" => Some(TransportEvent::Authenticated {
-                connection: ConnectionHandle(required(event.peer_handle, "peerHandle")?),
-                peer_id: PeerId::from_string(required(event.peer_id, "peerID")?),
-            }),
-            "peerDisconnected" => Some(TransportEvent::Disconnected {
-                connection: ConnectionHandle(required(event.peer_handle, "peerHandle")?),
-                reason: event.error.unwrap_or_else(|| "disconnected".into()),
-            }),
-            "frameReceived" => {
-                let channel = required(event.channel, "channel")?;
-                let bytes = decode(&required(event.payload_base64, "payloadBase64")?)?;
-                if channel == "audio" {
-                    let realtime: RealtimePayload =
-                        serde_json::from_slice(&bytes).map_err(|error| {
-                            AppleWireError::new(format!("invalid realtime audio envelope: {error}"))
-                        })?;
-                    Some(TransportEvent::RealtimeReceived {
-                        connection: ConnectionHandle(required(event.peer_handle, "peerHandle")?),
-                        stream_id: realtime.stream_id,
-                        sequence: realtime.sequence,
-                        timestamp_ms: realtime.timestamp_millis,
-                        bytes: decode(&realtime.payload_base64)?,
-                    })
-                } else {
-                    Some(TransportEvent::DataReceived {
-                        connection: ConnectionHandle(required(event.peer_handle, "peerHandle")?),
-                        bytes,
-                    })
+    pub fn shutdown(&self) -> Result<(), PeerTransportBackendError> {
+        if let Ok(mut state) = self.state.lock() {
+            state.configuration = None;
+            state.sessions.clear();
+            state.connections_by_peer.clear();
+            state.internal_requests.clear();
+            state.handler = None;
+        }
+        self.backend.shutdown()
+    }
+
+    fn handle_backend_event(&self, event: TransportBackendEvent) {
+        match event {
+            TransportBackendEvent::DiscoveryStarted { request_id } => {
+                self.emit(TransportEvent::DiscoveryStarted { request_id });
+            }
+            TransportBackendEvent::DiscoveryStopped { request_id } => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.configuration = None;
+                    state.sessions.clear();
+                    state.connections_by_peer.clear();
+                    state.internal_requests.clear();
+                }
+                self.emit(TransportEvent::DiscoveryStopped { request_id });
+            }
+            TransportBackendEvent::PeerFound { peer_id } => {
+                self.emit(TransportEvent::PeerFound { peer_id });
+            }
+            TransportBackendEvent::ConnectionOpened {
+                connection,
+                source,
+                expected_peer_id,
+            } => self.open_connection(connection, source, expected_peer_id),
+            TransportBackendEvent::Disconnected { connection, reason } => {
+                let was_current_authenticated_connection = self
+                    .state
+                    .lock()
+                    .is_ok_and(|mut state| state.remove_connection(connection));
+                if was_current_authenticated_connection {
+                    self.emit(TransportEvent::Disconnected { connection, reason });
                 }
             }
-            "frameSent" => Some(TransportEvent::Sent {
-                request_id: required(request_id, "requestID")?,
-            }),
-            "trafficClassChanged" => Some(TransportEvent::Sent {
-                request_id: required(request_id, "requestID")?,
-            }),
-            "commandFailed" | "capabilityBlocked" | "connectionFailed" | "transportFailed" => {
-                Some(TransportEvent::Failed {
-                    request_id,
-                    code: event
-                        .fields
-                        .get("reason")
-                        .cloned()
-                        .unwrap_or_else(|| event.event_type.clone()),
-                    message: event.error.unwrap_or_else(|| event.event_type.clone()),
-                    retryable: event.event_type != "capabilityBlocked",
-                })
+            TransportBackendEvent::FrameReceived {
+                connection,
+                channel,
+                bytes,
+            } => self.receive_frame(connection, channel, bytes),
+            TransportBackendEvent::Sent { request_id } => {
+                let internal = self
+                    .state
+                    .lock()
+                    .is_ok_and(|mut state| state.internal_requests.remove(&request_id));
+                if !internal {
+                    self.emit(TransportEvent::Sent { request_id });
+                }
             }
-            // Browser/listener/path state and traffic-class changes are diagnostics.
-            _ => None,
+            TransportBackendEvent::Failed {
+                request_id,
+                code,
+                message,
+                retryable,
+            } => {
+                let request_id = request_id.and_then(|request_id| {
+                    let internal = self
+                        .state
+                        .lock()
+                        .is_ok_and(|mut state| state.internal_requests.remove(&request_id));
+                    (!internal).then_some(request_id)
+                });
+                self.emit(TransportEvent::Failed {
+                    request_id,
+                    code,
+                    message,
+                    retryable,
+                });
+            }
+        }
+    }
+
+    fn open_connection(
+        &self,
+        connection: ConnectionHandle,
+        source: TransportConnectionSource,
+        expected_peer_id: Option<PeerId>,
+    ) {
+        let hello = match self
+            .state
+            .lock()
+            .map_err(|_| backend_state_poisoned())
+            .and_then(|mut state| {
+                let config = state
+                    .configuration
+                    .as_ref()
+                    .ok_or_else(|| {
+                        protocol_error("connection opened before discovery configuration")
+                    })?
+                    .clone();
+                let hello = encode_hello(&config)?;
+                state.sessions.insert(
+                    connection,
+                    PeerSession {
+                        source,
+                        expected_peer_id,
+                        authenticated_peer_id: None,
+                    },
+                );
+                Ok(hello)
+            }) {
+            Ok(hello) => hello,
+            Err(error) => {
+                self.reject_connection(connection, "authenticationFailed", error.to_string());
+                return;
+            }
         };
-        Ok(result)
-    }
-
-    fn encode(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
-    fn decode(value: &str) -> Result<Vec<u8>, AppleWireError> {
-        base64::engine::general_purpose::STANDARD
-            .decode(value)
-            .map_err(|error| {
-                AppleWireError::new(format!("invalid padded RFC 4648 base64: {error}"))
-            })
-    }
-
-    fn required<T>(value: Option<T>, field: &str) -> Result<T, AppleWireError> {
-        value.ok_or_else(|| AppleWireError::new(format!("missing {field}")))
-    }
-
-    fn request_to_apple(value: &RequestId) -> Result<String, AppleWireError> {
-        prefixed_id_to_uuid(value.as_str(), "req_")
-    }
-
-    fn request_from_apple(value: &str) -> Result<RequestId, AppleWireError> {
-        uuid_to_prefixed_id(value, "req_").map(RequestId::from_string)
-    }
-
-    fn canonical_uuid(value: &str) -> Result<String, AppleWireError> {
-        let simple = value.replace('-', "").to_ascii_lowercase();
-        if simple.len() != 32 || !simple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppleWireError::new(format!("{value} is not a UUID")));
+        if let Err(error) = self.send_internal_frame(connection, TransportChannel::Control, hello) {
+            self.reject_connection(connection, "authenticationFailed", error.to_string());
         }
-        Ok(format!(
-            "{}-{}-{}-{}-{}",
-            &simple[0..8],
-            &simple[8..12],
-            &simple[12..16],
-            &simple[16..20],
-            &simple[20..32]
-        ))
     }
 
-    fn prefixed_id_to_uuid(value: &str, prefix: &str) -> Result<String, AppleWireError> {
-        let simple = value.strip_prefix(prefix).unwrap_or(value).replace('-', "");
-        if simple.len() != 32 || !simple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppleWireError::new(format!(
-                "{value} is not a UUID-compatible ID"
-            )));
+    fn receive_frame(
+        &self,
+        connection: ConnectionHandle,
+        channel: TransportChannel,
+        bytes: Vec<u8>,
+    ) {
+        enum Outcome {
+            Authenticated {
+                peer_id: PeerId,
+                replaced: Option<ConnectionHandle>,
+            },
+            Data,
         }
-        Ok(format!(
-            "{}-{}-{}-{}-{}",
-            &simple[0..8],
-            &simple[8..12],
-            &simple[12..16],
-            &simple[16..20],
-            &simple[20..32]
-        ))
+
+        let outcome = self
+            .state
+            .lock()
+            .map_err(|_| backend_state_poisoned())
+            .and_then(|mut state| {
+                let configuration = state
+                    .configuration
+                    .as_ref()
+                    .ok_or_else(|| protocol_error("frame arrived without transport configuration"))?
+                    .clone();
+                let session = state
+                    .sessions
+                    .get_mut(&connection)
+                    .ok_or_else(|| protocol_error("frame arrived on an unknown connection"))?;
+                if session.authenticated_peer_id.is_some() {
+                    if channel == TransportChannel::Control {
+                        return Err(protocol_error("control frame arrived after authentication"));
+                    }
+                    return Ok(Outcome::Data);
+                }
+                if channel != TransportChannel::Control {
+                    return Err(protocol_error(
+                        "business frame arrived before authentication",
+                    ));
+                }
+                let hello = decode_and_validate_hello(&bytes, &configuration)?;
+                if session
+                    .expected_peer_id
+                    .as_ref()
+                    .is_some_and(|expected| expected != &hello.peer_id)
+                {
+                    return Err(protocol_error(
+                        "authenticated peer does not match the discovered endpoint",
+                    ));
+                }
+                let expected_source = if configuration.local_peer_id < hello.peer_id {
+                    TransportConnectionSource::Outbound
+                } else {
+                    TransportConnectionSource::Inbound
+                };
+                if session.source != expected_source {
+                    return Err(protocol_error(
+                        "connection violates stable peer-ID dial direction",
+                    ));
+                }
+                session.authenticated_peer_id = Some(hello.peer_id.clone());
+                let replaced = state
+                    .connections_by_peer
+                    .insert(hello.peer_id.clone(), connection)
+                    .filter(|old| *old != connection);
+                Ok(Outcome::Authenticated {
+                    peer_id: hello.peer_id,
+                    replaced,
+                })
+            });
+
+        match outcome {
+            Ok(Outcome::Authenticated { peer_id, replaced }) => {
+                if let Some(replaced) = replaced {
+                    let _ = self.disconnect_internal(replaced);
+                }
+                self.emit(TransportEvent::Authenticated {
+                    connection,
+                    peer_id,
+                });
+            }
+            Ok(Outcome::Data) => {
+                self.emit(TransportEvent::DataReceived { connection, bytes });
+            }
+            Err(error) => {
+                self.reject_connection(connection, "authenticationFailed", error.to_string());
+            }
+        }
     }
 
-    fn uuid_to_prefixed_id(value: &str, prefix: &str) -> Result<String, AppleWireError> {
-        let simple = value.replace('-', "").to_ascii_lowercase();
-        if simple.len() != 32 || !simple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppleWireError::new(format!("{value} is not a UUID")));
+    fn send_internal_frame(
+        &self,
+        connection: ConnectionHandle,
+        channel: TransportChannel,
+        bytes: Vec<u8>,
+    ) -> Result<(), PeerTransportBackendError> {
+        let request_id = RequestId::new();
+        self.state
+            .lock()
+            .map_err(|_| backend_state_poisoned())?
+            .internal_requests
+            .insert(request_id.clone());
+        if let Err(error) =
+            self.backend
+                .send_frame(request_id.to_string(), connection.0, channel, bytes)
+        {
+            if let Ok(mut state) = self.state.lock() {
+                state.internal_requests.remove(&request_id);
+            }
+            return Err(error);
         }
-        Ok(format!("{prefix}{simple}"))
+        Ok(())
+    }
+
+    fn disconnect_internal(
+        &self,
+        connection: ConnectionHandle,
+    ) -> Result<(), PeerTransportBackendError> {
+        let request_id = RequestId::new();
+        self.state
+            .lock()
+            .map_err(|_| backend_state_poisoned())?
+            .internal_requests
+            .insert(request_id.clone());
+        if let Err(error) = self
+            .backend
+            .disconnect(request_id.to_string(), connection.0)
+        {
+            if let Ok(mut state) = self.state.lock() {
+                state.internal_requests.remove(&request_id);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn reject_connection(&self, connection: ConnectionHandle, code: &str, message: String) {
+        if let Ok(mut state) = self.state.lock() {
+            state.remove_connection(connection);
+        }
+        let _ = self.disconnect_internal(connection);
+        self.emit(TransportEvent::Failed {
+            request_id: None,
+            code: code.to_owned(),
+            message,
+            retryable: false,
+        });
+    }
+
+    fn emit(&self, event: TransportEvent) {
+        let handler = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.handler.clone());
+        if let Some(handler) = handler {
+            handler(event);
+        }
+    }
+}
+
+impl PeerTransportRuntimeState {
+    fn reset_for_configuration(&mut self, configuration: TransportConfiguration) {
+        self.configuration = Some(configuration);
+        self.sessions.clear();
+        self.connections_by_peer.clear();
+        self.internal_requests.clear();
+    }
+
+    fn remove_connection(&mut self, connection: ConnectionHandle) -> bool {
+        if let Some(session) = self.sessions.remove(&connection) {
+            if let Some(peer_id) = session.authenticated_peer_id {
+                if self.connections_by_peer.get(&peer_id) == Some(&connection) {
+                    self.connections_by_peer.remove(&peer_id);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
+struct PeerHello {
+    peer_id: PeerId,
+}
+
+fn validate_configuration(
+    display_name: &str,
+    group_key: &[u8],
+) -> Result<(), PeerTransportBackendError> {
+    if display_name.is_empty() {
+        return Err(protocol_error("display name is required"));
+    }
+    if group_key.len() < 32 {
+        return Err(protocol_error("group key must contain at least 32 bytes"));
+    }
+    Ok(())
+}
+
+fn discovery_scope(group_key: &[u8]) -> Result<String, PeerTransportBackendError> {
+    let mut mac = HmacSha256::new_from_slice(group_key)
+        .map_err(|_| protocol_error("group key cannot initialize HMAC"))?;
+    mac.update(DISCOVERY_SCOPE_LABEL);
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn encode_hello(config: &TransportConfiguration) -> Result<Vec<u8>, PeerTransportBackendError> {
+    let peer = config.local_peer_id.as_str().as_bytes();
+    let group = config.group_id.as_str().as_bytes();
+    let display = config.display_name.as_bytes();
+    let peer_len = u16::try_from(peer.len()).map_err(|_| protocol_error("peer ID is too long"))?;
+    let group_len =
+        u16::try_from(group.len()).map_err(|_| protocol_error("group ID is too long"))?;
+    let display_len =
+        u16::try_from(display.len()).map_err(|_| protocol_error("display name is too long"))?;
+    let nonce = Uuid::new_v4();
+    let mut bytes = Vec::with_capacity(
+        4 + 2 + 2 + 2 + 2 + 16 + peer.len() + group.len() + display.len() + HELLO_TAG_BYTES,
+    );
+    bytes.extend_from_slice(HELLO_MAGIC);
+    bytes.extend_from_slice(&config.protocol_version.to_be_bytes());
+    bytes.extend_from_slice(&peer_len.to_be_bytes());
+    bytes.extend_from_slice(&group_len.to_be_bytes());
+    bytes.extend_from_slice(&display_len.to_be_bytes());
+    bytes.extend_from_slice(nonce.as_bytes());
+    bytes.extend_from_slice(peer);
+    bytes.extend_from_slice(group);
+    bytes.extend_from_slice(display);
+    let mut mac = HmacSha256::new_from_slice(&config.group_key)
+        .map_err(|_| protocol_error("group key cannot initialize HMAC"))?;
+    mac.update(&bytes);
+    bytes.extend_from_slice(&mac.finalize().into_bytes());
+    Ok(bytes)
+}
+
+fn decode_and_validate_hello(
+    bytes: &[u8],
+    config: &TransportConfiguration,
+) -> Result<PeerHello, PeerTransportBackendError> {
+    const FIXED_BYTES: usize = 4 + 2 + 2 + 2 + 2 + 16;
+    if bytes.len() < FIXED_BYTES + HELLO_TAG_BYTES || &bytes[..4] != HELLO_MAGIC {
+        return Err(protocol_error("peer hello is malformed"));
+    }
+    let protocol_version = u16::from_be_bytes([bytes[4], bytes[5]]);
+    if protocol_version != config.protocol_version {
+        return Err(protocol_error("peer protocol version does not match"));
+    }
+    let peer_len = u16::from_be_bytes([bytes[6], bytes[7]]) as usize;
+    let group_len = u16::from_be_bytes([bytes[8], bytes[9]]) as usize;
+    let display_len = u16::from_be_bytes([bytes[10], bytes[11]]) as usize;
+    let body_end = FIXED_BYTES
+        .checked_add(peer_len)
+        .and_then(|value| value.checked_add(group_len))
+        .and_then(|value| value.checked_add(display_len))
+        .ok_or_else(|| protocol_error("peer hello length overflow"))?;
+    if bytes.len() != body_end + HELLO_TAG_BYTES {
+        return Err(protocol_error(
+            "peer hello length does not match its header",
+        ));
+    }
+    let mut mac = HmacSha256::new_from_slice(&config.group_key)
+        .map_err(|_| protocol_error("group key cannot initialize HMAC"))?;
+    mac.update(&bytes[..body_end]);
+    mac.verify_slice(&bytes[body_end..])
+        .map_err(|_| protocol_error("peer group authentication failed"))?;
+    let peer_start = FIXED_BYTES;
+    let group_start = peer_start + peer_len;
+    let display_start = group_start + group_len;
+    let peer_id = std::str::from_utf8(&bytes[peer_start..group_start])
+        .map_err(|_| protocol_error("peer ID is not UTF-8"))?;
+    let group_id = std::str::from_utf8(&bytes[group_start..display_start])
+        .map_err(|_| protocol_error("group ID is not UTF-8"))?;
+    let _display_name = std::str::from_utf8(&bytes[display_start..body_end])
+        .map_err(|_| protocol_error("display name is not UTF-8"))?;
+    if group_id != config.group_id.as_str() {
+        return Err(protocol_error("peer belongs to a different group"));
+    }
+    let peer_id = PeerId::from(peer_id);
+    if peer_id == config.local_peer_id {
+        return Err(protocol_error("peer hello repeats the local identity"));
+    }
+    Ok(PeerHello { peer_id })
+}
+
+fn channel_for_traffic(traffic_class: TrafficClass) -> TransportChannel {
+    match traffic_class {
+        TrafficClass::EnergyEfficient => TransportChannel::Event,
+        TrafficClass::Bulk => TransportChannel::Chunk,
+        TrafficClass::RealtimeVoice => TransportChannel::Audio,
+    }
+}
+
+fn backend_state_poisoned() -> PeerTransportBackendError {
+    backend_error("peer transport runtime state is poisoned")
+}
+
+fn backend_is_shutdown() -> PeerTransportBackendError {
+    backend_error("peer transport backend is shut down")
+}
+
+fn backend_error(message: impl Into<String>) -> PeerTransportBackendError {
+    PeerTransportBackendError::Backend {
+        message: message.into(),
+    }
+}
+
+fn protocol_error(message: impl Into<String>) -> PeerTransportBackendError {
+    PeerTransportBackendError::Protocol {
+        message: message.into(),
     }
 }
 
 #[cfg(test)]
-mod apple_wire_tests {
+mod tests {
     use super::*;
-    use base64::Engine as _;
 
-    #[test]
-    fn start_contract_contains_group_key_and_der_identity() {
-        let command = TransportCommand::StartDiscovery {
-            request_id: RequestId::from("req_00112233445566778899aabbccddeeff"),
-            local_peer_id: PeerId::from("01234567-89ab-cdef-0123-456789abcdef"),
-            group_id: GroupId::from("trip"),
-            display_name: "Ken".into(),
+    fn start_command(local_peer_id: &str) -> TransportCommand {
+        TransportCommand::StartDiscovery {
+            request_id: RequestId::new(),
+            local_peer_id: PeerId::from(local_peer_id),
+            group_id: GroupId::from("group-one"),
+            display_name: "Traveller".into(),
             protocol_version: 1,
             group_key: vec![7; 32],
-            certificate_der: vec![1, 2, 3],
-            private_key_pkcs8: vec![4, 5, 6],
-        };
-        let value = apple_wire::command_to_value(&command).expect("valid start");
-        assert_eq!(value["type"], "start");
-        assert_eq!(value["localPeerID"], "01234567-89ab-cdef-0123-456789abcdef");
-        assert_eq!(
-            value["groupKeyBase64"],
-            base64::engine::general_purpose::STANDARD.encode([7; 32])
-        );
-        assert_eq!(value["certificateDERBase64"], "AQID");
-        assert_eq!(value["privateKeyPKCS8Base64"], "BAUG");
-        assert!(value.get("identityPKCS12Base64").is_none());
-        assert!(value.get("kind").is_none());
+            certificate_der: vec![1],
+            private_key_pkcs8: vec![2],
+        }
+    }
+
+    fn last_hello(backend: &FakePeerTransportBackend) -> Vec<u8> {
+        backend
+            .commands()
+            .into_iter()
+            .rev()
+            .find_map(|command| match command {
+                TransportBackendCommand::SendFrame {
+                    channel: TransportChannel::Control,
+                    bytes,
+                    ..
+                } => Some(bytes),
+                _ => None,
+            })
+            .expect("runtime sent a hello")
     }
 
     #[test]
-    fn frame_and_blocker_contracts_map_to_semantic_events() {
-        let envelope = serde_json::json!({
-            "streamID": "call-1",
-            "sequence": 3,
-            "timestampMillis": 42,
-            "payloadBase64": "AQI="
-        });
-        let payload = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&envelope).expect("envelope"));
-        let received = apple_wire::event_from_value(serde_json::json!({
-            "type": "frameReceived",
-            "peerHandle": 4,
-            "channel": "audio",
-            "payloadBase64": payload
-        }))
-        .expect("valid frame");
-        assert!(
-            matches!(received, Some(TransportEvent::RealtimeReceived { sequence: 3, bytes, .. }) if bytes == [1, 2])
-        );
+    fn native_start_receives_only_an_opaque_discovery_scope() {
+        let backend = Arc::new(FakePeerTransportBackend::default());
+        let runtime = PeerTransportRuntime::new(backend.clone());
+        runtime.dispatch(start_command("peer-a")).unwrap();
 
-        let blocked = apple_wire::event_from_value(serde_json::json!({
-            "type": "capabilityBlocked",
-            "requestID": "00112233-4455-6677-8899-aabbccddeeff",
-            "fields": {"reason": "tlsIdentityUnavailable"},
-            "error": "missing identity"
+        let TransportBackendCommand::StartDiscovery {
+            discovery_scope,
+            local_peer_id,
+            ..
+        } = &backend.commands()[0]
+        else {
+            panic!("expected start discovery");
+        };
+        assert_eq!(local_peer_id, &PeerId::from("peer-a"));
+        assert_eq!(discovery_scope.len(), 64);
+        assert_ne!(discovery_scope, "group-one");
+    }
+
+    #[test]
+    fn runtime_authenticates_hello_and_delivers_opaque_data_in_rust() {
+        let alice_backend = Arc::new(FakePeerTransportBackend::default());
+        let bob_backend = Arc::new(FakePeerTransportBackend::default());
+        let alice = PeerTransportRuntime::new(alice_backend.clone());
+        let bob = PeerTransportRuntime::new(bob_backend.clone());
+        let alice_events = Arc::new(Mutex::new(Vec::new()));
+        let bob_events = Arc::new(Mutex::new(Vec::new()));
+        let alice_received = alice_events.clone();
+        alice
+            .attach_event_handler(Arc::new(move |event| {
+                alice_received.lock().unwrap().push(event);
+            }))
+            .unwrap();
+        let bob_received = bob_events.clone();
+        bob.attach_event_handler(Arc::new(move |event| {
+            bob_received.lock().unwrap().push(event);
         }))
-        .expect("valid blocker");
-        assert!(
-            matches!(blocked, Some(TransportEvent::Failed { code, retryable: false, .. }) if code == "tlsIdentityUnavailable")
-        );
+        .unwrap();
+        alice.dispatch(start_command("peer-a")).unwrap();
+        bob.dispatch(start_command("peer-b")).unwrap();
+
+        alice_backend
+            .inject(TransportBackendEvent::ConnectionOpened {
+                connection: ConnectionHandle(11),
+                source: TransportConnectionSource::Outbound,
+                expected_peer_id: Some(PeerId::from("peer-b")),
+            })
+            .unwrap();
+        bob_backend
+            .inject(TransportBackendEvent::ConnectionOpened {
+                connection: ConnectionHandle(22),
+                source: TransportConnectionSource::Inbound,
+                expected_peer_id: None,
+            })
+            .unwrap();
+        let alice_hello = last_hello(&alice_backend);
+        let bob_hello = last_hello(&bob_backend);
+        alice_backend
+            .inject(TransportBackendEvent::FrameReceived {
+                connection: ConnectionHandle(11),
+                channel: TransportChannel::Control,
+                bytes: bob_hello,
+            })
+            .unwrap();
+        bob_backend
+            .inject(TransportBackendEvent::FrameReceived {
+                connection: ConnectionHandle(22),
+                channel: TransportChannel::Control,
+                bytes: alice_hello,
+            })
+            .unwrap();
+
+        assert!(alice_events
+            .lock()
+            .unwrap()
+            .contains(&TransportEvent::Authenticated {
+                connection: ConnectionHandle(11),
+                peer_id: PeerId::from("peer-b"),
+            }));
+        assert!(bob_events
+            .lock()
+            .unwrap()
+            .contains(&TransportEvent::Authenticated {
+                connection: ConnectionHandle(22),
+                peer_id: PeerId::from("peer-a"),
+            }));
+
+        bob_backend
+            .inject(TransportBackendEvent::FrameReceived {
+                connection: ConnectionHandle(22),
+                channel: TransportChannel::Audio,
+                bytes: vec![3, 4, 5],
+            })
+            .unwrap();
+        assert!(bob_events
+            .lock()
+            .unwrap()
+            .contains(&TransportEvent::DataReceived {
+                connection: ConnectionHandle(22),
+                bytes: vec![3, 4, 5],
+            }));
+
+        alice_events.lock().unwrap().clear();
+        alice_backend
+            .inject(TransportBackendEvent::ConnectionOpened {
+                connection: ConnectionHandle(12),
+                source: TransportConnectionSource::Outbound,
+                expected_peer_id: Some(PeerId::from("peer-b")),
+            })
+            .unwrap();
+        alice_backend
+            .inject(TransportBackendEvent::FrameReceived {
+                connection: ConnectionHandle(12),
+                channel: TransportChannel::Control,
+                bytes: last_hello(&bob_backend),
+            })
+            .unwrap();
+        alice_backend
+            .inject(TransportBackendEvent::Disconnected {
+                connection: ConnectionHandle(11),
+                reason: "superseded".into(),
+            })
+            .unwrap();
+        let events = alice_events.lock().unwrap();
+        assert!(events.contains(&TransportEvent::Authenticated {
+            connection: ConnectionHandle(12),
+            peer_id: PeerId::from("peer-b"),
+        }));
+        assert!(!events.contains(&TransportEvent::Disconnected {
+            connection: ConnectionHandle(11),
+            reason: "superseded".into(),
+        }));
     }
 }
+
+uniffi::setup_scaffolding!();

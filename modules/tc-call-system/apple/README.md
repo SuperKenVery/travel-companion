@@ -5,23 +5,12 @@ system calls, configures voice-chat audio, emits mono PCM16 capture frames, play
 and reports audio route/interruption/reset state. Call signaling and network audio transport remain
 owned by Rust call logic and `tc-peer-transport`; no socket exists here.
 
-Commands use `type` and `requestID?`. `reportIncoming` takes UUID `callID`, `peerID`, and
-`displayName?`; `startOutgoing` takes `callID`/`peerID`; `end` and `remoteAnswered` take `callID`;
-`remoteEnded` adds `reason?`; `setMuted` adds `muted`; `playAudio` takes `callID`,
-`pcm16Base64`, `sampleRate`, mono `channelCount`, `sequence`, and `timestampMillis`; `snapshot`
-has no extra fields.
-
-Every event has
-`{"type":String,"requestID":String?,"callID":String?,"peerID":String?,`<br>
-`"pcm16Base64":String?,"sampleRate":Double?,"channelCount":UInt32?,"sequence":UInt64?,`<br>
-`"timestampMillis":UInt64?,"fields":{String:String}?,"error":String?}`. Stable types include
-`incomingCallReported`, `incomingCallReportFailed`, `outgoingCallRequested`, `transactionFailed`,
-`remoteAnswered`, `remoteEnded`, `startSignalingRequested`, `answerSignalingRequested`,
-`endSignalingRequested`, `muteChanged`, `audioFrame`, `audioFrameQueued`, `audioFramesDropped`,
-`audioFrameDropped`, `audioPrepared`, `audioActivated`, `audioDeactivated`, `audioRouteSnapshot`,
-`audioRouteChanged`, `audioRouteReason`, `audioInterruption`, `audioFailed`, `mediaServicesReset`,
-`providerReset`, `capabilitySnapshot`, and `commandFailed`.
+The public API is typed: every Rust `CallSystemCommand` variant maps to a backend method and the
+callback receives `TcCallSystemEvent`. `TcCallSystemAudioRoute` carries route values without string
+tags. `Data` crosses the boundary only for actual PCM16 audio frames. The backend converts semantic
+call IDs to CallKit UUIDs internally. Unsupported explicit route selection becomes a typed `failed`
+event because AVAudioSession and system UI own route selection.
 
 The receive jitter buffer targets 3 frames, retains at most 12, reorders by sequence, skips a
-missing range after 60 ms or window pressure, emits the exact dropped range, rejects late and
-duplicate frames, and clears on call end.
+missing range after 60 ms or window pressure, rejects late and duplicate frames, and clears on call
+end. Jitter diagnostics stay internal; only typed domain events cross the boundary.

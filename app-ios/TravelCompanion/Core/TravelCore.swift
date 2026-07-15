@@ -10,8 +10,9 @@ final class TravelCore {
     private(set) var isProcessing = false
     private(set) var lastError: CoreErrorPayload?
 
-    @ObservationIgnored private var handle: OpaquePointer?
+    @ObservationIgnored private var binding: TravelCoreBinding?
     @ObservationIgnored private var capabilityRuntime: AppleCapabilityRuntime?
+    @ObservationIgnored private var coreListener: AppleCoreEventListener?
     @ObservationIgnored private var notificationTask: Task<Void, Never>?
 
     func bootstrap() async {
@@ -21,24 +22,41 @@ final class TravelCore {
 
         do {
             let configuration = try Self.configurationJSON()
-            let created = configuration.withCString { tc_core_create($0) }
-            guard let created else {
-                throw Self.consumeLastCoreError()
-            }
-            handle = created
-
-            capabilityRuntime = AppleCapabilityRuntime { [weak self] module, event in
-                guard let self else { return }
-                Task { @MainActor in
-                    await self.ingestModuleEvent(module: module, event: event)
+            let runtime = AppleCapabilityRuntime()
+            let listener = AppleCoreEventListener { [weak self] replyJSON in
+                guard let self, self.binding != nil else { return }
+                do {
+                    try self.applyReply(replyJSON)
+                    self.lastError = nil
+                } catch {
+                    self.lastError = Self.errorPayload(from: error)
                 }
             }
+            let created = try TravelCoreBinding(
+                configJson: configuration,
+                bluetooth: runtime.bluetooth,
+                peerTransport: runtime.peerTransport,
+                location: runtime.location,
+                ranging: runtime.ranging,
+                notifications: runtime.notifications,
+                callSystem: runtime.callSystem,
+                secureStorage: runtime.secureStorage,
+                listener: listener
+            )
+            binding = created
+            capabilityRuntime = runtime
+            coreListener = listener
             try refreshSnapshot()
-            try drainModuleCommands()
             startNotificationObservation()
             isBootstrapped = true
             lastError = nil
         } catch {
+            notificationTask?.cancel()
+            notificationTask = nil
+            try? binding?.shutdown()
+            binding = nil
+            capabilityRuntime = nil
+            coreListener = nil
             lastError = Self.errorPayload(from: error)
         }
     }
@@ -47,18 +65,15 @@ final class TravelCore {
         if !isBootstrapped {
             await bootstrap()
         }
-        guard let handle else { return }
+        guard let binding else { return }
 
         isProcessing = true
         defer { isProcessing = false }
 
         do {
             let json = try Self.string(from: Self.encoder.encode(command))
-            let response = try json.withCString { commandPointer in
-                try Self.consume(tc_core_dispatch_json(handle, commandPointer))
-            }
+            let response = binding.dispatchJson(commandJson: json)
             try applyReply(response)
-            try drainModuleCommands()
             lastError = nil
         } catch {
             lastError = Self.errorPayload(from: error)
@@ -66,13 +81,12 @@ final class TravelCore {
     }
 
     func refresh() async {
-        guard handle != nil else {
+        guard binding != nil else {
             await bootstrap()
             return
         }
         do {
             try refreshSnapshot()
-            try drainModuleCommands()
             lastError = nil
         } catch {
             lastError = Self.errorPayload(from: error)
@@ -82,56 +96,33 @@ final class TravelCore {
     func shutdown() {
         notificationTask?.cancel()
         notificationTask = nil
-        capabilityRuntime?.shutdown()
+        try? binding?.shutdown()
+        binding = nil
         capabilityRuntime = nil
-        if let handle {
-            tc_core_destroy(handle)
-            self.handle = nil
-        }
+        coreListener = nil
         isBootstrapped = false
     }
 
-    private func ingestModuleEvent(module: String, event: Data) async {
-        guard let handle else { return }
-        do {
-            let value = try Self.decoder.decode(JSONValue.self, from: event)
-            let envelope = ModuleEventEnvelope(module: module, event: value)
-            let json = try Self.string(from: Self.encoder.encode(envelope))
-            let response = try json.withCString { eventPointer in
-                try Self.consume(tc_core_ingest_module_event_json(handle, eventPointer))
-            }
-            try applyReply(response)
-            try drainModuleCommands()
-        } catch {
-            lastError = Self.errorPayload(from: error)
-        }
-    }
-
     private func refreshSnapshot() throws {
-        guard let handle else { throw TravelCoreError.notInitialized }
-        let data = try Self.consume(tc_core_snapshot_json(handle))
+        guard let binding else { throw TravelCoreError.notInitialized }
+        let data = Data(binding.snapshotJson().utf8)
         snapshot = try Self.decoder.decode(AppSnapshot.self, from: data)
     }
 
-    private func applyReply(_ data: Data) throws {
+    private func applyReply(_ json: String) throws {
+        let data = Data(json.utf8)
         let reply = try Self.decoder.decode(CoreReply.self, from: data)
         if let error = reply.error {
             throw TravelCoreError.core(error)
         }
         if let snapshot = reply.snapshot {
-            self.snapshot = snapshot
+            // Foreign callbacks can originate on different framework queues.
+            // Never let a delayed callback roll the UI back to an older core revision.
+            if snapshot.revision >= self.snapshot.revision {
+                self.snapshot = snapshot
+            }
         } else {
             try refreshSnapshot()
-        }
-    }
-
-    private func drainModuleCommands() throws {
-        guard let handle, let capabilityRuntime else { return }
-        let data = try Self.consume(tc_core_drain_module_commands_json(handle))
-        let commands = try Self.decoder.decode([ModuleCommandEnvelope].self, from: data)
-        for command in commands {
-            let payload = try Self.encoder.encode(command.command)
-            capabilityRuntime.submit(module: command.module, command: payload)
         }
     }
 
@@ -169,27 +160,6 @@ final class TravelCore {
             displayName: UIDevice.current.name
         )
         return try string(from: encoder.encode(configuration))
-    }
-
-    private static func consume(_ pointer: UnsafeMutablePointer<CChar>?) throws -> Data {
-        guard let pointer else { throw consumeLastCoreError() }
-        defer { tc_core_string_free(pointer) }
-        guard let data = String(validatingCString: pointer)?.data(using: .utf8) else {
-            throw TravelCoreError.invalidUTF8
-        }
-        return data
-    }
-
-    private static func consumeLastCoreError() -> TravelCoreError {
-        guard let pointer = tc_core_last_error_json() else { return .notInitialized }
-        defer { tc_core_string_free(pointer) }
-        guard
-            let data = String(validatingCString: pointer)?.data(using: .utf8),
-            let payload = try? decoder.decode(CoreErrorPayload.self, from: data)
-        else {
-            return .notInitialized
-        }
-        return .core(payload)
     }
 
     private static func string(from data: Data) throws -> String {
@@ -235,11 +205,6 @@ private struct CoreConfiguration: Encodable {
     var displayName: String
 }
 
-private struct ModuleEventEnvelope: Encodable {
-    var module: String
-    var event: JSONValue
-}
-
 private enum TravelCoreError: LocalizedError {
     case notInitialized
     case invalidUTF8
@@ -254,5 +219,29 @@ private enum TravelCoreError: LocalizedError {
         case .core(let payload):
             payload.message
         }
+    }
+}
+
+private final class AppleCoreEventListener: CoreEventListener, @unchecked Sendable {
+    typealias Handler = @MainActor @Sendable (String) -> Void
+
+    private let handler: Handler
+    private let lock = NSLock()
+    private var tail: Task<Void, Never>?
+
+    init(handler: @escaping Handler) {
+        self.handler = handler
+    }
+
+    func onUpdate(replyJson: String) {
+        lock.lock()
+        let previous = tail
+        let handler = handler
+        let next = Task.detached {
+            await previous?.value
+            await MainActor.run { handler(replyJson) }
+        }
+        tail = next
+        lock.unlock()
     }
 }

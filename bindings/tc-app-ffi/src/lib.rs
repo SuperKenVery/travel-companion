@@ -1,42 +1,39 @@
-//! Panic-safe C ABI used by the SwiftUI application.
+//! Panic-safe UniFFI boundary used by the SwiftUI application.
 //!
 //! `tc-core` deliberately exposes platform-neutral domain models. This crate is
 //! the GUI adapter: it accepts the compact command vocabulary emitted by Swift,
 //! supplies runtime-only values (timestamps and generated resource identifiers),
 //! and projects the domain snapshot into the stable schema consumed by the app.
 
+uniffi::setup_scaffolding!();
+tc_bluetooth::uniffi_reexport_scaffolding!();
+tc_call_system::uniffi_reexport_scaffolding!();
+tc_location::uniffi_reexport_scaffolding!();
+tc_notifications::uniffi_reexport_scaffolding!();
+tc_peer_transport::uniffi_reexport_scaffolding!();
+tc_ranging::uniffi_reexport_scaffolding!();
+tc_secure_storage::uniffi_reexport_scaffolding!();
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CStr, CString};
-use std::os::raw::c_char;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
-use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tc_core::{AppCommand, CoreConfig, ModuleEventEnvelope, TravelCore};
+use tc_core::{AppCommand, CoreConfig, TravelCore};
 use tc_location_logic::{
     relative_location, FusionPolicy, RelativeLocation, RelativeSource, UwbObservation,
 };
 use tc_model::LocationSample;
+
+mod uniffi_api;
+pub use uniffi_api::{CoreEventListener, TravelCoreBinding, TravelCoreBindingError};
 
 const PROTOCOL_VERSION: u16 = 1;
 const PRECISION_REQUEST_TTL_MS: i64 = 60_000;
 const DOCUMENT_LEASE_DURATION_MS: i64 = 120_000;
 
 static RESOURCE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-thread_local! {
-    static LAST_ERROR: RefCell<Value> = const { RefCell::new(Value::Null) };
-}
-
-#[repr(C)]
-pub struct TcCore {
-    inner: Mutex<BindingCore>,
-}
 
 struct BindingCore {
     core: TravelCore,
@@ -625,196 +622,6 @@ struct GuiDiagnosticEvent {
     subsystem: String,
     level: String,
     message: String,
-}
-
-/// Creates a new core from an optional UTF-8 JSON configuration.
-///
-/// # Safety
-///
-/// A non-null `config_json` must point to a valid NUL-terminated C string for
-/// the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_create(config_json: *const c_char) -> *mut TcCore {
-    catch_pointer(|| {
-        let config = if config_json.is_null() {
-            CoreConfig::default()
-        } else {
-            let input = unsafe { input_string(config_json)? };
-            serde_json::from_str(&input).map_err(|error| {
-                ffi_error(
-                    "invalidConfig",
-                    format!("configuration JSON is invalid: {error}"),
-                )
-            })?
-        };
-        let core =
-            TravelCore::new(config).map_err(|error| ffi_error(error.code(), error.to_string()))?;
-        Ok(Box::into_raw(Box::new(TcCore {
-            inner: Mutex::new(BindingCore {
-                core,
-                revision: 0,
-                resources: BTreeMap::new(),
-            }),
-        })))
-    })
-}
-
-/// Destroys a core handle previously returned by [`tc_core_create`].
-///
-/// # Safety
-///
-/// `handle` must be null or a live handle returned by [`tc_core_create`], and
-/// it must not be used again after this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_destroy(handle: *mut TcCore) {
-    if handle.is_null() {
-        return;
-    }
-    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        drop(Box::from_raw(handle));
-    }));
-    if let Err(panic) = result {
-        set_last_error(ffi_error("panic", panic_message(panic)));
-    }
-}
-
-/// Dispatches one UTF-8 JSON GUI command and returns an owned JSON string.
-///
-/// # Safety
-///
-/// `handle` must be a live core handle and `command_json` must point to a valid
-/// NUL-terminated C string for the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_dispatch_json(
-    handle: *mut TcCore,
-    command_json: *const c_char,
-) -> *mut c_char {
-    catch_json(|| {
-        let command_json = unsafe { input_string(command_json)? };
-        let command: GuiCommand = serde_json::from_str(&command_json).map_err(|error| {
-            ffi_error(
-                "invalidCommand",
-                format!("command JSON is invalid: {error}"),
-            )
-        })?;
-        let mut binding = lock_core(handle)?;
-        let context = binding
-            .core
-            .snapshot()
-            .and_then(|snapshot| serde_json::to_value(snapshot).map_err(Into::into))
-            .map_err(|error| ffi_error(error.code(), error.to_string()))?;
-        let (command, effect) = adapt_command(command, &context, unix_now_ms())?;
-        let snapshot = binding
-            .core
-            .dispatch(command)
-            .map_err(|error| ffi_error(error.code(), error.to_string()))?;
-        apply_effect(&mut binding.resources, effect);
-        binding.revision = binding.revision.saturating_add(1);
-        let snapshot = adapt_snapshot(
-            snapshot,
-            binding.revision,
-            &binding.resources,
-            unix_now_ms(),
-        )?;
-        Ok(json!({"ok": true, "snapshot": snapshot}))
-    })
-}
-
-/// Returns the current GUI snapshot as an owned JSON string.
-///
-/// # Safety
-///
-/// `handle` must be null or a live core handle for the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_snapshot_json(handle: *const TcCore) -> *mut c_char {
-    catch_json(|| {
-        let binding = lock_core(handle.cast_mut())?;
-        let snapshot = binding
-            .core
-            .snapshot()
-            .map_err(|error| ffi_error(error.code(), error.to_string()))?;
-        serde_json::to_value(adapt_snapshot(
-            snapshot,
-            binding.revision,
-            &binding.resources,
-            unix_now_ms(),
-        )?)
-        .map_err(|error| ffi_error("serializationFailed", error.to_string()))
-    })
-}
-
-/// Ingests one UTF-8 JSON native-module event and returns the updated snapshot.
-///
-/// # Safety
-///
-/// `handle` must be a live core handle and `event_json` must point to a valid
-/// NUL-terminated C string for the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_ingest_module_event_json(
-    handle: *mut TcCore,
-    event_json: *const c_char,
-) -> *mut c_char {
-    catch_json(|| {
-        let event_json = unsafe { input_string(event_json)? };
-        let event: ModuleEventEnvelope = serde_json::from_str(&event_json).map_err(|error| {
-            ffi_error(
-                "invalidModuleEvent",
-                format!("module event JSON is invalid: {error}"),
-            )
-        })?;
-        let mut binding = lock_core(handle)?;
-        let snapshot = binding
-            .core
-            .ingest_module_event_at(event, unix_now_ms())
-            .map_err(|error| ffi_error(error.code(), error.to_string()))?;
-        binding.revision = binding.revision.saturating_add(1);
-        let snapshot = adapt_snapshot(
-            snapshot,
-            binding.revision,
-            &binding.resources,
-            unix_now_ms(),
-        )?;
-        Ok(json!({"ok": true, "snapshot": snapshot}))
-    })
-}
-
-/// Drains queued native-module commands into an owned JSON string.
-///
-/// # Safety
-///
-/// `handle` must be a live core handle for the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_drain_module_commands_json(handle: *mut TcCore) -> *mut c_char {
-    catch_json(|| {
-        let mut binding = lock_core(handle)?;
-        serde_json::to_value(binding.core.drain_module_commands())
-            .map_err(|error| ffi_error("serializationFailed", error.to_string()))
-    })
-}
-
-#[no_mangle]
-pub extern "C" fn tc_core_last_error_json() -> *mut c_char {
-    let error = LAST_ERROR.with(|last| last.borrow().clone());
-    owned_json_string(&error)
-}
-
-/// Releases a string returned by another function in this C ABI.
-///
-/// # Safety
-///
-/// `string` must be null or an unfreed pointer returned by this crate. It must
-/// not be used again after this call.
-#[no_mangle]
-pub unsafe extern "C" fn tc_core_string_free(string: *mut c_char) {
-    if string.is_null() {
-        return;
-    }
-    let result = catch_unwind(AssertUnwindSafe(|| unsafe {
-        drop(CString::from_raw(string));
-    }));
-    if let Err(panic) = result {
-        set_last_error(ffi_error("panic", panic_message(panic)));
-    }
 }
 
 fn adapt_command(
@@ -1756,87 +1563,8 @@ fn unix_now_ms() -> i64 {
         })
 }
 
-fn lock_core(handle: *mut TcCore) -> Result<std::sync::MutexGuard<'static, BindingCore>, Value> {
-    let handle = unsafe {
-        handle
-            .as_ref()
-            .ok_or_else(|| ffi_error("nullHandle", "core handle is null"))?
-    };
-    // The C owner guarantees the handle outlives each call. The guard never
-    // escapes a public ABI function and is never retained by Rust.
-    let handle: &'static TcCore = unsafe { &*(handle as *const TcCore) };
-    handle
-        .inner
-        .lock()
-        .map_err(|_| ffi_error("lockPoisoned", "core lock was poisoned"))
-}
-
-unsafe fn input_string(pointer: *const c_char) -> Result<String, Value> {
-    if pointer.is_null() {
-        return Err(ffi_error("nullInput", "required UTF-8 input is null"));
-    }
-    unsafe { CStr::from_ptr(pointer) }
-        .to_str()
-        .map(str::to_owned)
-        .map_err(|error| ffi_error("invalidUtf8", error.to_string()))
-}
-
-fn catch_pointer(operation: impl FnOnce() -> Result<*mut TcCore, Value>) -> *mut TcCore {
-    match catch_unwind(AssertUnwindSafe(operation)) {
-        Ok(Ok(pointer)) => {
-            clear_last_error();
-            pointer
-        }
-        Ok(Err(error)) => {
-            set_last_error(error);
-            ptr::null_mut()
-        }
-        Err(panic) => {
-            set_last_error(ffi_error("panic", panic_message(panic)));
-            ptr::null_mut()
-        }
-    }
-}
-
-fn catch_json(operation: impl FnOnce() -> Result<Value, Value>) -> *mut c_char {
-    let value = match catch_unwind(AssertUnwindSafe(operation)) {
-        Ok(Ok(value)) => {
-            clear_last_error();
-            value
-        }
-        Ok(Err(error)) => {
-            set_last_error(error.clone());
-            json!({"ok": false, "error": error})
-        }
-        Err(panic) => {
-            let error = ffi_error("panic", panic_message(panic));
-            set_last_error(error.clone());
-            json!({"ok": false, "error": error})
-        }
-    };
-    owned_json_string(&value)
-}
-
-fn owned_json_string(value: &Value) -> *mut c_char {
-    let json = serde_json::to_string(value).unwrap_or_else(|_| {
-        "{\"ok\":false,\"error\":{\"code\":\"serializationFailed\",\"message\":\"failed to encode error\"}}".into()
-    });
-    let sanitized = json.replace('\0', "\\u0000");
-    CString::new(sanitized)
-        .expect("NUL bytes were escaped")
-        .into_raw()
-}
-
 fn ffi_error(code: impl Into<String>, message: impl Into<String>) -> Value {
     json!({"code": code.into(), "message": message.into()})
-}
-
-fn set_last_error(error: Value) {
-    LAST_ERROR.with(|last| *last.borrow_mut() = error);
-}
-
-fn clear_last_error() {
-    LAST_ERROR.with(|last| *last.borrow_mut() = json!(null));
 }
 
 fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
@@ -1854,77 +1582,6 @@ fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
-    use tempfile::tempdir;
-
-    fn output_value(pointer: *mut c_char) -> Value {
-        assert!(!pointer.is_null());
-        let value =
-            serde_json::from_str(unsafe { CStr::from_ptr(pointer) }.to_str().unwrap()).unwrap();
-        unsafe { tc_core_string_free(pointer) };
-        value
-    }
-
-    fn test_core() -> (*mut TcCore, tempfile::TempDir) {
-        let directory = tempdir().unwrap();
-        let config = CString::new(
-            json!({
-                "storagePath": directory.path().join("ffi.sqlite3"),
-                "resourcesPath": directory.path().join("resources"),
-                "displayName": "Alice"
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let handle = unsafe { tc_core_create(config.as_ptr()) };
-        assert!(!handle.is_null());
-        (handle, directory)
-    }
-
-    #[test]
-    fn public_type_commands_inject_runtime_fields_and_return_gui_schema() {
-        let (handle, _directory) = test_core();
-        let command = CString::new(r#"{"type":"createGroup","name":"Trip"}"#).unwrap();
-        let value = output_value(unsafe { tc_core_dispatch_json(handle, command.as_ptr()) });
-        assert_eq!(value["ok"], true, "{value:#}");
-        let snapshot = &value["snapshot"];
-        assert_eq!(snapshot["protocolVersion"], PROTOCOL_VERSION);
-        assert_eq!(snapshot["revision"], 1);
-        assert_eq!(snapshot["identity"]["displayName"], "Alice");
-        assert!(snapshot["identity"].get("peerID").is_some());
-        assert_eq!(snapshot["group"]["name"], "Trip");
-        assert!(snapshot["group"].get("invitePIN").is_some());
-        assert!(snapshot["group"].get("invitePin").is_none());
-        assert_eq!(snapshot["conversations"][0]["id"], "group");
-        assert!(snapshot.get("pendingPrecisionRequests").is_some());
-        assert!(snapshot["lifecycle"].get("sharingPaused").is_none());
-        assert!(snapshot["identity"].get("keyReady").is_none());
-
-        let sharing = CString::new(r#"{"type":"setLocationSharing","enabled":false}"#).unwrap();
-        let value = output_value(unsafe { tc_core_dispatch_json(handle, sharing.as_ptr()) });
-        assert_eq!(
-            value["snapshot"]["lifecycle"]["locationSharingEnabled"],
-            false
-        );
-        unsafe { tc_core_destroy(handle) };
-    }
-
-    #[test]
-    fn legacy_internal_command_schema_is_not_part_of_the_public_abi() {
-        let (handle, _directory) = test_core();
-        let command = CString::new(r#"{"kind":"createGroup","name":"Trip","nowMs":1}"#).unwrap();
-        let value = output_value(unsafe { tc_core_dispatch_json(handle, command.as_ptr()) });
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["code"], "invalidCommand");
-        unsafe { tc_core_destroy(handle) };
-    }
-
-    #[test]
-    fn null_handle_errors_are_json() {
-        let value = output_value(unsafe { tc_core_snapshot_json(ptr::null()) });
-        assert_eq!(value["ok"], false);
-        assert_eq!(value["error"]["code"], "nullHandle");
-    }
 
     #[test]
     fn all_swift_command_tags_deserialize_without_now_ms() {

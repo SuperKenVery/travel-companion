@@ -2,37 +2,68 @@
 @preconcurrency import CallKit
 import Foundation
 
-public typealias TcCallSystemEventSink = @MainActor @Sendable (Data) -> Void
+public enum TcCallSystemAudioRoute: Sendable, Equatable {
+    case receiver
+    case speaker
+    case wiredHeadset
+    case bluetooth
+}
+
+/// Typed events emitted by the CallKit/AVFAudio backend. `Data` appears only
+/// for actual PCM16 audio frames.
+public enum TcCallSystemEvent: Sendable, Equatable {
+    case incomingReported(requestID: String, callID: String)
+    case outgoingReported(requestID: String, callID: String)
+    case userAnswered(callID: String)
+    case userRejected(callID: String)
+    case userEnded(callID: String)
+    case audioActivated(callID: String)
+    case audioDeactivated(callID: String)
+    case audioInterrupted(callID: String, shouldResume: Bool)
+    case routeChanged(route: TcCallSystemAudioRoute)
+    case audioFrame(
+        callID: String,
+        pcm16: Data,
+        sampleRate: UInt32,
+        channelCount: UInt32,
+        sequence: UInt64,
+        timestampMs: Int64
+    )
+    case mutedChanged(callID: String, muted: Bool)
+    case failed(requestID: String?, code: String, message: String)
+}
+
+public typealias TcCallSystemEventSink = @MainActor @Sendable (TcCallSystemEvent) -> Void
+
+/// Platform capability values exposed without leaking CallKit or AVFAudio objects.
+public struct TcCallSystemCapabilitySnapshot: Sendable, Equatable {
+    public let incomingCallUI: Bool
+    public let backgroundAudio: Bool
+    public let voiceProcessing: Bool
+    public let bluetoothRoutes: Bool
+
+    public init(
+        incomingCallUI: Bool,
+        backgroundAudio: Bool,
+        voiceProcessing: Bool,
+        bluetoothRoutes: Bool
+    ) {
+        self.incomingCallUI = incomingCallUI
+        self.backgroundAudio = backgroundAudio
+        self.voiceProcessing = voiceProcessing
+        self.bluetoothRoutes = bluetoothRoutes
+    }
+}
 
 @MainActor
 public final class TcCallSystemAppleBackend: NSObject {
-    private struct Command: Decodable {
-        var type: String
-        var requestID: String?
-        var callID: String?
-        var peerID: String?
-        var displayName: String?
-        var pcm16Base64: String?
-        var sampleRate: Double?
-        var channelCount: UInt32?
-        var sequence: UInt64?
-        var timestampMillis: UInt64?
-        var reason: String?
-        var muted: Bool?
-    }
-
-    private struct Event: Encodable {
-        var type: String
-        var requestID: String?
-        var callID: String?
-        var peerID: String?
-        var pcm16Base64: String?
-        var sampleRate: Double?
-        var channelCount: UInt32?
-        var sequence: UInt64?
-        var timestampMillis: UInt64?
-        var fields: [String: String]?
-        var error: String?
+    public nonisolated static var capabilitySnapshot: TcCallSystemCapabilitySnapshot {
+        TcCallSystemCapabilitySnapshot(
+            incomingCallUI: true,
+            backgroundAudio: true,
+            voiceProcessing: true,
+            bluetoothRoutes: true
+        )
     }
 
     private struct IncomingAudioFrame {
@@ -87,28 +118,90 @@ public final class TcCallSystemAppleBackend: NSObject {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
-    public func submit(_ json: Data) {
-        let command: Command
-        do {
-            command = try JSONDecoder().decode(Command.self, from: json)
-        } catch {
-            emit(.init(type: "commandFailed", error: String(describing: error)))
-            return
+    public func reportIncoming(
+        requestID: String,
+        callID: String,
+        peerID: String,
+        displayName: String
+    ) {
+        perform(requestID: requestID, callID: callID, peerID: peerID) {
+            try reportIncomingImpl(
+                requestID: requestID,
+                callID: callID,
+                peerID: peerID,
+                displayName: displayName
+            )
         }
-        do {
-            switch command.type {
-            case "reportIncoming": try reportIncoming(command)
-            case "startOutgoing": try startOutgoing(command)
-            case "end": try end(command)
-            case "remoteAnswered": try remoteAnswered(command)
-            case "remoteEnded": try remoteEnded(command)
-            case "playAudio": try playAudio(command)
-            case "setMuted": try setMuted(command)
-            case "snapshot": snapshot(requestID: command.requestID)
-            default: emit(.init(type: "commandFailed", requestID: command.requestID, error: "unknown command: \(command.type)"))
-            }
-        } catch {
-            emit(.init(type: "commandFailed", requestID: command.requestID, callID: command.callID, peerID: command.peerID, error: String(describing: error)))
+    }
+
+    public func reportOutgoing(
+        requestID: String,
+        callID: String,
+        peerID: String,
+        displayName: String
+    ) {
+        perform(requestID: requestID, callID: callID, peerID: peerID) {
+            try startOutgoingImpl(
+                requestID: requestID,
+                callID: callID,
+                peerID: peerID,
+                displayName: displayName
+            )
+        }
+    }
+
+    public func activateAudio(requestID: String, callID: String) {
+        perform(requestID: requestID, callID: callID) {
+            try remoteAnsweredImpl(requestID: requestID, callID: callID)
+        }
+    }
+
+    public func deactivateAudio(requestID: String, callID: String) {
+        perform(requestID: requestID, callID: callID) {
+            try remoteEndedImpl(requestID: requestID, callID: callID)
+        }
+    }
+
+    public func setMuted(requestID: String, callID: String, muted: Bool) {
+        perform(requestID: requestID, callID: callID) {
+            try setMutedImpl(requestID: requestID, callID: callID, muted: muted)
+        }
+    }
+
+    public func setRoute(requestID: String, route: TcCallSystemAudioRoute) {
+        _ = route
+        emit(.failed(
+            requestID: requestID,
+            code: "commandFailed",
+            message: BackendError.systemOwnsRoute.description
+        ))
+    }
+
+    public func playAudio(
+        requestID: String,
+        callID: String,
+        pcm16: Data,
+        sampleRate: UInt32,
+        channelCount: UInt32,
+        sequence: UInt64,
+        timestampMs: Int64
+    ) {
+        perform(requestID: requestID, callID: callID) {
+            try playAudioImpl(
+                requestID: requestID,
+                callID: callID,
+                pcm16: pcm16,
+                sampleRate: sampleRate,
+                channelCount: channelCount,
+                sequence: sequence,
+                timestampMs: timestampMs
+            )
+        }
+    }
+
+    public func end(requestID: String, callID: String, reason: String) {
+        perform(requestID: requestID, callID: callID) {
+            try endImpl(requestID: requestID, callID: callID, reason: reason)
         }
     }
 
@@ -119,12 +212,19 @@ public final class TcCallSystemAppleBackend: NSObject {
         provider.invalidate()
     }
 
-    private func reportIncoming(_ command: Command) throws {
-        let callID = try requiredCallID(command)
-        guard let peerID = command.peerID, !peerID.isEmpty else { throw BackendError.invalidPeerID }
+    private func reportIncomingImpl(
+        requestID: String,
+        callID callIDText: String,
+        peerID: String,
+        displayName: String
+    ) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
+        guard !peerID.isEmpty else { throw BackendError.invalidPeerID }
+        guard !displayName.isEmpty else { throw BackendError.missingField("displayName") }
         let update = CXCallUpdate()
         update.remoteHandle = CXHandle(type: .generic, value: peerID)
-        update.localizedCallerName = command.displayName ?? peerID
+        update.localizedCallerName = displayName
         update.hasVideo = false
         update.supportsHolding = false
         update.supportsGrouping = false
@@ -133,38 +233,61 @@ public final class TcCallSystemAppleBackend: NSObject {
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
-                    self.emit(.init(type: "incomingCallReportFailed", requestID: command.requestID, callID: callID.uuidString, peerID: peerID, error: String(describing: error)))
+                    self.emit(.failed(
+                        requestID: requestID,
+                        code: "incomingCallReportFailed",
+                        message: String(describing: error)
+                    ))
                 } else {
                     self.activeCallID = callID
                     self.activePeerID = peerID
                     self.mediaAllowed = false
-                    self.emit(.init(type: "incomingCallReported", requestID: command.requestID, callID: callID.uuidString, peerID: peerID))
+                    self.emit(.incomingReported(
+                        requestID: requestID,
+                        callID: Self.semanticCallID(callID)
+                    ))
                 }
             }
         }
     }
 
-    private func startOutgoing(_ command: Command) throws {
-        let callID = try requiredCallID(command)
-        guard let peerID = command.peerID, !peerID.isEmpty else { throw BackendError.invalidPeerID }
+    private func startOutgoingImpl(
+        requestID: String,
+        callID callIDText: String,
+        peerID: String,
+        displayName: String
+    ) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
+        guard !peerID.isEmpty else { throw BackendError.invalidPeerID }
+        guard !displayName.isEmpty else { throw BackendError.missingField("displayName") }
         let action = CXStartCallAction(call: callID, handle: CXHandle(type: .generic, value: peerID))
         callController.request(CXTransaction(action: action)) { [weak self] error in
             Task { @MainActor in
                 guard let self else { return }
                 if let error {
-                    self.emit(.init(type: "transactionFailed", requestID: command.requestID, callID: callID.uuidString, error: String(describing: error)))
+                    self.emit(.failed(
+                        requestID: requestID,
+                        code: "transactionFailed",
+                        message: String(describing: error)
+                    ))
                 } else {
                     self.activeCallID = callID
                     self.activePeerID = peerID
                     self.mediaAllowed = false
-                    self.emit(.init(type: "outgoingCallRequested", requestID: command.requestID, callID: callID.uuidString, peerID: peerID))
+                    self.emit(.outgoingReported(
+                        requestID: requestID,
+                        callID: Self.semanticCallID(callID)
+                    ))
                 }
             }
         }
     }
 
-    private func end(_ command: Command) throws {
-        let callID = try requiredCallID(command)
+    private func endImpl(requestID: String, callID callIDText: String, reason: String) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
+        guard !reason.isEmpty else { throw BackendError.missingField("reason") }
         programmaticEndCallIDs.insert(callID)
         if activeCallID == callID {
             mediaAllowed = false
@@ -176,40 +299,51 @@ public final class TcCallSystemAppleBackend: NSObject {
                     self?.programmaticEndCallIDs.remove(callID)
                     self?.mediaAllowed = true
                     self?.startAudio()
-                    self?.emit(.init(type: "transactionFailed", requestID: command.requestID, callID: callID.uuidString, error: String(describing: error)))
+                    self?.emit(.failed(
+                        requestID: requestID,
+                        code: "transactionFailed",
+                        message: String(describing: error)
+                    ))
                 }
             }
         }
     }
 
-    private func remoteAnswered(_ command: Command) throws {
-        let callID = try requiredCallID(command)
+    private func remoteAnsweredImpl(requestID: String, callID callIDText: String) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
         provider.reportOutgoingCall(with: callID, connectedAt: .now)
         activeCallID = callID
         try prepareAudio()
         mediaAllowed = true
         startAudio()
-        emit(.init(type: "audioActivationRequested", requestID: command.requestID, callID: callID.uuidString))
     }
 
-    private func remoteEnded(_ command: Command) throws {
-        let callID = try requiredCallID(command)
-        provider.reportCall(with: callID, endedAt: .now, reason: Self.endReason(command.reason))
+    private func remoteEndedImpl(requestID: String, callID callIDText: String) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
+        provider.reportCall(with: callID, endedAt: .now, reason: .remoteEnded)
         if activeCallID == callID {
             mediaAllowed = false
             stopAudio()
             activeCallID = nil
             activePeerID = nil
         }
-        emit(.init(type: "audioDeactivationRequested", requestID: command.requestID, callID: callID.uuidString, fields: ["reason": command.reason ?? "remoteEnded"]))
+        emit(.audioDeactivated(callID: Self.semanticCallID(callID)))
     }
 
-    private func setMuted(_ command: Command) throws {
-        let callID = try requiredCallID(command)
-        let muted = command.muted ?? true
+    private func setMutedImpl(requestID: String, callID callIDText: String, muted: Bool) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
         callController.request(CXTransaction(action: CXSetMutedCallAction(call: callID, muted: muted))) { [weak self] error in
             Task { @MainActor in
-                if let error { self?.emit(.init(type: "transactionFailed", requestID: command.requestID, callID: callID.uuidString, error: String(describing: error))) }
+                if let error {
+                    self?.emit(.failed(
+                        requestID: requestID,
+                        code: "transactionFailed",
+                        message: String(describing: error)
+                    ))
+                }
             }
         }
     }
@@ -219,7 +353,6 @@ public final class TcCallSystemAppleBackend: NSObject {
         try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
         try session.setPreferredIOBufferDuration(0.02)
         try session.setPreferredSampleRate(48_000)
-        emitRoute(type: "audioPrepared")
     }
 
     private func startAudio() {
@@ -235,14 +368,13 @@ public final class TcCallSystemAppleBackend: NSObject {
                     Task { @MainActor in
                         guard let self, self.engineRunning, !self.isMuted, self.activeCallID == callID else { return }
                         self.audioSequence &+= 1
-                        self.emit(.init(
-                            type: "audioFrame",
-                            callID: callID.uuidString,
-                            pcm16Base64: pcm.base64EncodedString(),
-                            sampleRate: sampleRate,
+                        self.emit(.audioFrame(
+                            callID: Self.semanticCallID(callID),
+                            pcm16: pcm,
+                            sampleRate: UInt32(sampleRate.rounded()),
                             channelCount: 1,
                             sequence: self.audioSequence,
-                            timestampMillis: Self.nowMillis
+                            timestampMs: Int64(clamping: Self.nowMillis)
                         ))
                     }
                 }
@@ -251,21 +383,34 @@ public final class TcCallSystemAppleBackend: NSObject {
             try engine.start()
             player.play()
             engineRunning = true
-            emitRoute(type: "audioActivated")
+            emit(.audioActivated(callID: Self.semanticCallID(callID)))
         } catch {
-            emit(.init(type: "audioFailed", callID: callID.uuidString, error: String(describing: error)))
+            emit(.failed(
+                requestID: nil,
+                code: "audioFailed",
+                message: String(describing: error)
+            ))
         }
     }
 
-    private func playAudio(_ command: Command) throws {
-        let callID = try requiredCallID(command)
+    private func playAudioImpl(
+        requestID: String,
+        callID callIDText: String,
+        pcm16: Data,
+        sampleRate: UInt32,
+        channelCount: UInt32,
+        sequence: UInt64,
+        timestampMs: Int64
+    ) throws {
+        try validate(requestID: requestID)
+        let callID = try parseCallID(callIDText)
         guard callID == activeCallID else { throw BackendError.inactiveCall }
-        guard let encoded = command.pcm16Base64, let data = Data(base64Encoded: encoded), !data.isEmpty else { throw BackendError.invalidAudio }
-        guard let sequence = command.sequence, let timestampMillis = command.timestampMillis else { throw BackendError.missingAudioMetadata }
-        let sampleRate = command.sampleRate ?? 48_000
-        let channelCount = command.channelCount ?? 1
+        guard !pcm16.isEmpty else { throw BackendError.invalidAudio }
+        guard timestampMs >= 0 else { throw BackendError.missingAudioMetadata }
+        let timestampMillis = UInt64(timestampMs)
+        let sampleRate = Double(sampleRate)
         guard channelCount == 1 else { throw BackendError.unsupportedChannelCount }
-        guard data.count.isMultiple(of: MemoryLayout<Int16>.size), sampleRate.isFinite, sampleRate >= 8_000, sampleRate <= 96_000 else {
+        guard pcm16.count.isMultiple(of: MemoryLayout<Int16>.size), sampleRate.isFinite, sampleRate >= 8_000, sampleRate <= 96_000 else {
             throw BackendError.invalidAudio
         }
 
@@ -285,22 +430,13 @@ public final class TcCallSystemAppleBackend: NSObject {
         jitterFrames[sequence] = IncomingAudioFrame(
             sequence: sequence,
             timestampMillis: timestampMillis,
-            pcm16: data,
+            pcm16: pcm16,
             sampleRate: sampleRate,
             channelCount: channelCount
         )
         if nextPlaybackSequence == nil || !jitterPrimed, let minimum = jitterFrames.keys.min() {
             nextPlaybackSequence = minimum
         }
-        emit(.init(
-            type: "audioFrameQueued",
-            requestID: command.requestID,
-            callID: callID.uuidString,
-            sequence: sequence,
-            timestampMillis: timestampMillis,
-            fields: ["byteCount": String(data.count), "queuedDepth": String(jitterFrames.count)]
-        ))
-
         if jitterFrames.count >= Self.jitterTargetDepth {
             jitterPrimed = true
             jitterDeadlineTask?.cancel()
@@ -329,7 +465,11 @@ public final class TcCallSystemAppleBackend: NSObject {
                 try schedule(frame)
                 lastPlayedSequence = expected
             } catch {
-                emit(.init(type: "audioFrameDropped", callID: callID.uuidString, sequence: expected, timestampMillis: frame.timestampMillis, fields: ["reason": "decode"], error: String(describing: error)))
+                emit(.failed(
+                    requestID: nil,
+                    code: "audioFrameDropped",
+                    message: String(describing: error)
+                ))
             }
             nextPlaybackSequence = expected &+ 1
         }
@@ -371,26 +511,20 @@ public final class TcCallSystemAppleBackend: NSObject {
     }
 
     private func emitDropped(callID: UUID, from: UInt64, through: UInt64, reason: String) {
-        let count = through >= from ? through - from + 1 : 0
-        emit(.init(type: "audioFramesDropped", callID: callID.uuidString, sequence: from, fields: [
-            "throughSequence": String(through),
-            "count": String(count),
-            "reason": reason,
-            "queuedDepth": String(jitterFrames.count),
-        ]))
+        _ = callID
+        _ = from
+        _ = through
+        _ = reason
     }
 
     private func resetJitterBuffer(reason: String) {
-        let discarded = jitterFrames.count
+        _ = reason
         jitterDeadlineTask?.cancel()
         jitterDeadlineTask = nil
         jitterFrames.removeAll()
         nextPlaybackSequence = nil
         lastPlayedSequence = nil
         jitterPrimed = false
-        if discarded > 0, let callID = activeCallID {
-            emit(.init(type: "audioFramesDropped", callID: callID.uuidString, fields: ["count": String(discarded), "reason": reason]))
-        }
     }
 
     private func stopAudio() {
@@ -404,67 +538,114 @@ public final class TcCallSystemAppleBackend: NSObject {
         engineRunning = false
     }
 
-    private func snapshot(requestID: String?) {
-        emit(.init(type: "capabilitySnapshot", requestID: requestID, callID: activeCallID?.uuidString, peerID: activePeerID, fields: [
-            "active": String(activeCallID != nil),
-            "audioEngineRunning": String(engineRunning),
-            "networkAudioOwner": "tc-peer-transport",
-            "maximumCallGroups": "1",
-            "maximumCallsPerGroup": "1",
-        ]))
-        emitRoute(type: "audioRouteSnapshot", requestID: requestID)
+    private func perform(
+        requestID: String,
+        callID: String? = nil,
+        peerID: String? = nil,
+        operation: () throws -> Void
+    ) {
+        do {
+            try operation()
+        } catch {
+            emit(.failed(
+                requestID: requestID,
+                code: "commandFailed",
+                message: String(describing: error)
+            ))
+        }
     }
 
-    private func requiredCallID(_ command: Command) throws -> UUID {
-        guard let text = command.callID, let callID = UUID(uuidString: text) else { throw BackendError.invalidCallID }
+    private func validate(requestID: String) throws {
+        guard !requestID.isEmpty else { throw BackendError.missingField("requestID") }
+    }
+
+    private func parseCallID(_ text: String) throws -> UUID {
+        let unprefixed = text.hasPrefix("call_") ? String(text.dropFirst("call_".count)) : text
+        let simple = unprefixed.replacingOccurrences(of: "-", with: "")
+        guard simple.count == 32,
+              simple.utf8.allSatisfy({ byte in
+                  (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+                      || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains(byte)
+                      || (UInt8(ascii: "A")...UInt8(ascii: "F")).contains(byte)
+              }),
+              let callID = UUID(uuidString: Self.hyphenatedUUID(simple))
+        else { throw BackendError.invalidCallID }
         return callID
     }
 
-    private func emitRoute(type: String, requestID: String? = nil) {
+    private func emitRoute() {
         let route = AVAudioSession.sharedInstance().currentRoute
-        emit(.init(type: type, requestID: requestID, callID: activeCallID?.uuidString, fields: [
-            "inputs": route.inputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ","),
-            "outputs": route.outputs.map { "\($0.portType.rawValue):\($0.portName)" }.joined(separator: ","),
-            "sampleRate": String(AVAudioSession.sharedInstance().sampleRate),
-            "ioBufferDuration": String(AVAudioSession.sharedInstance().ioBufferDuration),
-        ]))
+        let description = (route.outputs + route.inputs)
+            .map { "\($0.portType.rawValue):\($0.portName)" }
+            .joined(separator: ",")
+            .lowercased()
+        emit(.routeChanged(route: Self.semanticRoute(from: description)))
     }
 
-    private func emit(_ event: Event) {
-        if let data = try? JSONEncoder().encode(event) { eventSink(data) }
+    private func emit(_ event: TcCallSystemEvent) {
+        eventSink(event)
+    }
+
+    private nonisolated static func semanticCallID(_ callID: UUID) -> String {
+        "call_" + callID.uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    }
+
+    private nonisolated static func semanticRoute(from route: String) -> TcCallSystemAudioRoute {
+        if route.contains("bluetooth") { return .bluetooth }
+        if route.contains("headphone") || route.contains("headset") || route.contains("usb") {
+            return .wiredHeadset
+        }
+        if route.contains("speaker") { return .speaker }
+        return .receiver
+    }
+
+    private nonisolated static func hyphenatedUUID(_ simple: String) -> String {
+        let characters = Array(simple)
+        return String(characters[0..<8]) + "-"
+            + String(characters[8..<12]) + "-"
+            + String(characters[12..<16]) + "-"
+            + String(characters[16..<20]) + "-"
+            + String(characters[20..<32])
     }
 
     @objc private func routeChanged(_ notification: Notification) {
-        let reason = (notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? NSNumber).flatMap { AVAudioSession.RouteChangeReason(rawValue: $0.uintValue) }
-        emitRoute(type: "audioRouteChanged")
-        if let reason { emit(.init(type: "audioRouteReason", callID: activeCallID?.uuidString, fields: ["reason": String(describing: reason)])) }
+        _ = notification
+        emitRoute()
     }
 
     @objc private func audioInterrupted(_ notification: Notification) {
         guard let callID = activeCallID else { return }
         let raw = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
         let type = raw.flatMap(AVAudioSession.InterruptionType.init(rawValue:))
-        let phase: String
+        let shouldResume: Bool
         switch type {
         case .began:
-            phase = "began"
+            shouldResume = false
             engine.pause()
             player.pause()
             engineRunning = false
         case .ended:
-            phase = "ended"
+            shouldResume = true
             startAudio()
         case nil:
-            phase = "unknown"
+            shouldResume = false
         @unknown default:
-            phase = "unknown"
+            shouldResume = false
         }
-        emit(.init(type: "audioInterruption", callID: callID.uuidString, fields: ["phase": phase]))
+        emit(.audioInterrupted(
+            callID: Self.semanticCallID(callID),
+            shouldResume: shouldResume
+        ))
     }
 
     @objc private func mediaServicesReset(_ notification: Notification) {
+        _ = notification
         stopAudio()
-        emit(.init(type: "mediaServicesReset", callID: activeCallID?.uuidString))
+        emit(.failed(
+            requestID: nil,
+            code: "mediaServicesReset",
+            message: "AVAudioSession media services were reset"
+        ))
     }
 
     private nonisolated static func encodePCM16(_ buffer: AVAudioPCMBuffer) -> Data? {
@@ -484,18 +665,9 @@ public final class TcCallSystemAppleBackend: NSObject {
         UInt64(max(0, Date.now.timeIntervalSince1970 * 1_000))
     }
 
-    private static func endReason(_ value: String?) -> CXCallEndedReason {
-        switch value {
-        case "failed": .failed
-        case "unanswered": .unanswered
-        case "declinedElsewhere": .declinedElsewhere
-        case "answeredElsewhere": .answeredElsewhere
-        default: .remoteEnded
-        }
-    }
-
     private enum BackendError: Error, CustomStringConvertible {
-        case invalidCallID, invalidPeerID, inactiveCall, invalidAudio, unsupportedChannelCount, missingAudioMetadata
+        case invalidCallID, invalidPeerID, inactiveCall, invalidAudio, unsupportedChannelCount
+        case missingAudioMetadata, missingField(String), systemOwnsRoute
         var description: String {
             switch self {
             case .invalidCallID: "callID must be a UUID"
@@ -503,7 +675,9 @@ public final class TcCallSystemAppleBackend: NSObject {
             case .inactiveCall: "audio frame does not belong to the active call"
             case .invalidAudio: "invalid PCM16 audio frame"
             case .unsupportedChannelCount: "only mono PCM16 audio is supported"
-            case .missingAudioMetadata: "audio sequence and timestampMillis are required"
+            case .missingAudioMetadata: "audio sequence and timestampMs are required and nonnegative"
+            case let .missingField(field): "\(field) is required"
+            case .systemOwnsRoute: "AVAudioSession and system UI own route selection"
             }
         }
     }
@@ -517,7 +691,11 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
             self?.stopAudio()
             self?.activeCallID = nil
             self?.activePeerID = nil
-            self?.emit(.init(type: "providerReset"))
+            self?.emit(.failed(
+                requestID: nil,
+                code: "providerReset",
+                message: "CallKit provider was reset"
+            ))
         }
     }
 
@@ -531,10 +709,13 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
                 try self.prepareAudio()
                 provider.reportOutgoingCall(with: action.callUUID, startedConnectingAt: .now)
                 action.fulfill()
-                self.emit(.init(type: "startSignalingRequested", callID: action.callUUID.uuidString, peerID: action.handle.value))
             } catch {
                 action.fail()
-                self.emit(.init(type: "audioFailed", callID: action.callUUID.uuidString, error: String(describing: error)))
+                self.emit(.failed(
+                    requestID: nil,
+                    code: "audioFailed",
+                    message: String(describing: error)
+                ))
             }
         }
     }
@@ -547,10 +728,14 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
             do {
                 try self.prepareAudio()
                 action.fulfill()
-                self.emit(.init(type: "answerSignalingRequested", callID: action.callUUID.uuidString, peerID: self.activePeerID))
+                self.emit(.userAnswered(callID: Self.semanticCallID(action.callUUID)))
             } catch {
                 action.fail()
-                self.emit(.init(type: "audioFailed", callID: action.callUUID.uuidString, error: String(describing: error)))
+                self.emit(.failed(
+                    requestID: nil,
+                    code: "audioFailed",
+                    message: String(describing: error)
+                ))
             }
         }
     }
@@ -561,10 +746,8 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
             let programmatic = self.programmaticEndCallIDs.remove(action.callUUID) != nil
             self.mediaAllowed = false
             self.stopAudio()
-            if programmatic {
-                self.emit(.init(type: "callEnded", callID: action.callUUID.uuidString, peerID: self.activePeerID))
-            } else {
-                self.emit(.init(type: "endSignalingRequested", callID: action.callUUID.uuidString, peerID: self.activePeerID))
+            if !programmatic {
+                self.emit(.userEnded(callID: Self.semanticCallID(action.callUUID)))
             }
             self.activeCallID = nil
             self.activePeerID = nil
@@ -575,7 +758,10 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
     nonisolated public func provider(_ provider: CXProvider, perform action: CXSetMutedCallAction) {
         Task { @MainActor [weak self] in
             self?.isMuted = action.isMuted
-            self?.emit(.init(type: "muteChanged", callID: action.callUUID.uuidString, fields: ["muted": String(action.isMuted)]))
+            self?.emit(.mutedChanged(
+                callID: Self.semanticCallID(action.callUUID),
+                muted: action.isMuted
+            ))
             action.fulfill()
         }
     }
@@ -591,48 +777,9 @@ extension TcCallSystemAppleBackend: CXProviderDelegate {
         Task { @MainActor [weak self] in
             self?.callKitAudioActive = false
             self?.stopAudio()
-            self?.emit(.init(type: "audioDeactivated", callID: self?.activeCallID?.uuidString))
+            if let callID = self?.activeCallID {
+                self?.emit(.audioDeactivated(callID: Self.semanticCallID(callID)))
+            }
         }
     }
-}
-
-// MARK: - Module-private C ABI
-
-public typealias CallSystemCEventCallback = @convention(c) (UnsafePointer<UInt8>?, Int, UInt) -> Void
-private final class CallSystemCallbackBox: @unchecked Sendable {
-    let callback: CallSystemCEventCallback
-    let context: UInt
-    init(callback: @escaping CallSystemCEventCallback, context: UInt) { self.callback = callback; self.context = context }
-    @MainActor func send(_ data: Data) { data.withUnsafeBytes { callback($0.bindMemory(to: UInt8.self).baseAddress, data.count, context) } }
-}
-private final class CallSystemHandleSource: @unchecked Sendable {
-    static let shared = CallSystemHandleSource()
-    private let lock = NSLock()
-    private var next: UInt64 = 1
-    func allocate() -> UInt64 { lock.withLock { defer { next &+= 1 }; return next } }
-}
-@MainActor private enum CallSystemRuntime {
-    static var backends: [UInt64: TcCallSystemAppleBackend] = [:]
-}
-
-@_cdecl("tc_call_system_apple_create")
-public func tc_call_system_apple_create(_ callback: CallSystemCEventCallback?, _ context: UInt) -> UInt64 {
-    guard let callback else { return 0 }
-    let handle = CallSystemHandleSource.shared.allocate()
-    let box = CallSystemCallbackBox(callback: callback, context: context)
-    Task { @MainActor in CallSystemRuntime.backends[handle] = TcCallSystemAppleBackend(eventSink: box.send) }
-    return handle
-}
-
-@_cdecl("tc_call_system_apple_submit")
-public func tc_call_system_apple_submit(_ handle: UInt64, _ bytes: UnsafePointer<UInt8>?, _ length: Int) -> Bool {
-    guard length >= 0, length == 0 || bytes != nil else { return false }
-    let data = length == 0 ? Data() : Data(bytes: bytes!, count: length)
-    Task { @MainActor in CallSystemRuntime.backends[handle]?.submit(data) }
-    return true
-}
-
-@_cdecl("tc_call_system_apple_destroy")
-public func tc_call_system_apple_destroy(_ handle: UInt64) {
-    Task { @MainActor in CallSystemRuntime.backends.removeValue(forKey: handle)?.shutdown() }
 }

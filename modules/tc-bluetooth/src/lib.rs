@@ -1,21 +1,34 @@
 //! Platform-neutral BLE control-plane capability.
+//!
+//! Product control messages and their BLE wire protocol stay in Rust. Native
+//! backends only own Core Bluetooth objects and move opaque, MTU-bounded
+//! packets between stable integer handles.
+
+mod ffi;
+
+pub use ffi::{BluetoothBackend, BluetoothBackendError, BluetoothEventSink};
+pub use tc_protocol::BluetoothControlMessage;
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 use tc_model::{PeerId, RequestId};
+use tc_protocol::{BluetoothControlAction, BluetoothControlCodec, BLUETOOTH_DEFAULT_PACKET_BYTES};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
 pub struct PeerHandle(pub u64);
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize, uniffi::Record)]
 #[serde(rename_all = "camelCase")]
 pub struct BluetoothCapabilities {
     pub central: bool,
     pub peripheral: bool,
     pub state_restoration: bool,
     pub background_control: bool,
-    pub max_control_payload_bytes: u32,
+    /// Conservative maximum size of one packet accepted by the native
+    /// backend. Rust performs fragmentation before crossing UniFFI.
+    pub max_packet_bytes: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -43,8 +56,7 @@ pub enum BluetoothCommand {
     SendControl {
         request_id: RequestId,
         handle: PeerHandle,
-        control_kind: String,
-        payload: Vec<u8>,
+        message: BluetoothControlMessage,
         expires_at_ms: i64,
     },
 }
@@ -89,9 +101,9 @@ pub enum BluetoothEvent {
     },
     ControlReceived {
         handle: PeerHandle,
-        control_kind: String,
-        payload: Vec<u8>,
+        message: BluetoothControlMessage,
     },
+    /// The remote Rust codec acknowledged the logical control message.
     ControlSent {
         request_id: RequestId,
     },
@@ -103,42 +115,77 @@ pub enum BluetoothEvent {
     },
 }
 
-pub trait BluetoothBackend: Send {
-    fn capabilities(&self) -> BluetoothCapabilities;
-    /// Must return immediately. Completion arrives through `poll_event`.
-    fn submit(&mut self, command: BluetoothCommand);
-    fn poll_event(&mut self) -> Option<BluetoothEvent>;
+/// Commands visible to a platform BLE backend and to its fake. There are no
+/// product control kinds here: `SendPacket` carries an already framed packet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BluetoothBackendCommand {
+    Start {
+        request_id: RequestId,
+    },
+    Stop {
+        request_id: RequestId,
+    },
+    Connect {
+        request_id: RequestId,
+        handle: PeerHandle,
+    },
+    Disconnect {
+        request_id: RequestId,
+        handle: PeerHandle,
+    },
+    SendPacket {
+        request_id: RequestId,
+        handle: PeerHandle,
+        packet: Vec<u8>,
+    },
 }
 
-pub struct Bluetooth<B: BluetoothBackend> {
-    backend: B,
+/// Events produced by a platform BLE backend before the Rust wire codec.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BluetoothBackendEvent {
+    Started {
+        request_id: RequestId,
+    },
+    Stopped {
+        request_id: RequestId,
+    },
+    PeerDiscovered {
+        peer_id: PeerId,
+        handle: PeerHandle,
+    },
+    Connected {
+        request_id: RequestId,
+        handle: PeerHandle,
+    },
+    Disconnected {
+        handle: PeerHandle,
+        reason: String,
+    },
+    PacketReceived {
+        handle: PeerHandle,
+        packet: Vec<u8>,
+    },
+    PacketSent {
+        request_id: RequestId,
+    },
+    Failed {
+        request_id: Option<RequestId>,
+        code: String,
+        message: String,
+        retryable: bool,
+    },
 }
 
-impl<B: BluetoothBackend> Bluetooth<B> {
-    #[must_use]
-    pub fn new(backend: B) -> Self {
-        Self { backend }
-    }
-
-    #[must_use]
-    pub fn capabilities(&self) -> BluetoothCapabilities {
-        self.backend.capabilities()
-    }
-
-    pub fn submit(&mut self, command: BluetoothCommand) {
-        self.backend.submit(command);
-    }
-
-    pub fn poll_event(&mut self) -> Option<BluetoothEvent> {
-        self.backend.poll_event()
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct FakeBluetoothBackend {
     capabilities: BluetoothCapabilities,
-    commands: Vec<BluetoothCommand>,
-    events: VecDeque<BluetoothEvent>,
+    state: Mutex<FakeBluetoothState>,
+}
+
+#[derive(Default)]
+struct FakeBluetoothState {
+    commands: Vec<BluetoothBackendCommand>,
+    event_sink: Option<Arc<BluetoothEventSink>>,
+    is_shutdown: bool,
 }
 
 impl Default for FakeBluetoothBackend {
@@ -149,371 +196,511 @@ impl Default for FakeBluetoothBackend {
                 peripheral: true,
                 state_restoration: true,
                 background_control: true,
-                max_control_payload_bytes: 256,
+                max_packet_bytes: BLUETOOTH_DEFAULT_PACKET_BYTES as u32,
             },
-            commands: Vec::new(),
-            events: VecDeque::new(),
+            state: Mutex::new(FakeBluetoothState::default()),
         }
     }
 }
 
 impl FakeBluetoothBackend {
-    pub fn inject(&mut self, event: BluetoothEvent) {
-        self.events.push_back(event);
+    pub fn inject(&self, event: BluetoothBackendEvent) -> Result<(), BluetoothBackendError> {
+        let event_sink = {
+            let state = self.state.lock().expect("fake Bluetooth state poisoned");
+            if state.is_shutdown {
+                return Err(backend_error("backend is shut down"));
+            }
+            state.event_sink.clone().ok_or_else(|| {
+                backend_error("cannot inject an event before attaching an event sink")
+            })?
+        };
+        event_sink.emit(event);
+        Ok(())
+    }
+
+    fn record(&self, command: BluetoothBackendCommand) -> Result<(), BluetoothBackendError> {
+        let mut state = self.state.lock().expect("fake Bluetooth state poisoned");
+        if state.is_shutdown {
+            return Err(backend_error("backend is shut down"));
+        }
+        state.commands.push(command);
+        Ok(())
     }
 
     #[must_use]
-    pub fn commands(&self) -> &[BluetoothCommand] {
-        &self.commands
+    pub fn commands(&self) -> Vec<BluetoothBackendCommand> {
+        self.state
+            .lock()
+            .expect("fake Bluetooth state poisoned")
+            .commands
+            .clone()
     }
 }
 
 impl BluetoothBackend for FakeBluetoothBackend {
-    fn capabilities(&self) -> BluetoothCapabilities {
-        self.capabilities.clone()
+    fn capabilities(&self) -> Result<BluetoothCapabilities, BluetoothBackendError> {
+        Ok(self.capabilities.clone())
     }
 
-    fn submit(&mut self, command: BluetoothCommand) {
-        self.commands.push(command);
-    }
-
-    fn poll_event(&mut self) -> Option<BluetoothEvent> {
-        self.events.pop_front()
-    }
-}
-
-/// Adapter for the private JSON contract implemented by `TcBluetoothApple`.
-///
-/// The semantic API deliberately keeps CoreBluetooth objects and its private
-/// `type`-tagged schema out of the rest of the Rust core.
-pub mod apple_wire {
-    use super::{BluetoothCommand, BluetoothEvent, PeerHandle};
-    use base64::Engine as _;
-    use serde::Deserialize;
-    use serde_json::{json, Value};
-    use std::collections::BTreeMap;
-    use std::fmt::{Display, Formatter};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    use tc_model::{PeerId, RequestId};
-
-    #[derive(Clone, Debug, Eq, PartialEq)]
-    pub struct AppleWireError(String);
-
-    impl AppleWireError {
-        fn new(message: impl Into<String>) -> Self {
-            Self(message.into())
+    fn attach_event_sink(
+        &self,
+        event_sink: Arc<BluetoothEventSink>,
+    ) -> Result<(), BluetoothBackendError> {
+        let mut state = self.state.lock().expect("fake Bluetooth state poisoned");
+        if state.is_shutdown {
+            return Err(backend_error("backend is shut down"));
         }
+        state.event_sink = Some(event_sink);
+        Ok(())
     }
 
-    impl Display for AppleWireError {
-        fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str(&self.0)
-        }
-    }
-
-    impl std::error::Error for AppleWireError {}
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct AppleEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        #[serde(rename = "requestID")]
-        request_id: Option<String>,
-        peer_handle: Option<u64>,
-        #[serde(rename = "messageID")]
-        message_id: Option<String>,
-        payload_base64: Option<String>,
-        #[serde(default)]
-        fields: BTreeMap<String, String>,
-        error: Option<String>,
-    }
-
-    #[derive(serde::Serialize, Deserialize)]
-    struct ControlPayload {
-        kind: String,
-        #[serde(rename = "payloadBase64")]
-        payload_base64: String,
-    }
-
-    /// Converts a semantic command to the private Apple JSON value.
-    pub fn command_to_value(command: &BluetoothCommand) -> Result<Value, AppleWireError> {
-        command_to_value_at(command, unix_time_millis())
-    }
-
-    /// Clock-injectable form used by deterministic callers and contract tests.
-    pub fn command_to_value_at(
-        command: &BluetoothCommand,
-        now_ms: i64,
-    ) -> Result<Value, AppleWireError> {
-        let value = match command {
-            BluetoothCommand::Start { request_id } => {
-                json!({"type": "start", "requestID": request_to_apple(request_id)?})
-            }
-            BluetoothCommand::Stop { request_id } => {
-                json!({"type": "stop", "requestID": request_to_apple(request_id)?})
-            }
-            // The Apple backend connects every discovered peripheral itself.
-            // Snapshot is an accepted, side-effect-free acknowledgement while
-            // the eventual peerConnected event remains the source of truth.
-            BluetoothCommand::Connect { request_id, .. } => {
-                json!({"type": "snapshot", "requestID": request_to_apple(request_id)?})
-            }
-            BluetoothCommand::Disconnect { request_id, handle } => json!({
-                "type": "disconnect",
-                "requestID": request_to_apple(request_id)?,
-                "peerHandle": handle.0,
-            }),
-            BluetoothCommand::SendControl {
-                request_id,
-                handle,
-                control_kind,
-                payload,
-                expires_at_ms,
-            } => {
-                let envelope = ControlPayload {
-                    kind: control_kind.clone(),
-                    payload_base64: encode(payload),
-                };
-                let payload = serde_json::to_vec(&envelope)
-                    .map_err(|error| AppleWireError::new(error.to_string()))?;
-                let request = request_to_apple(request_id)?;
-                json!({
-                    "type": "sendControl",
-                    "requestID": request,
-                    "peerHandle": handle.0,
-                    "messageID": request_to_apple(request_id)?,
-                    "sequence": stable_sequence(request_id.as_str()),
-                    "ttlMillis": expires_at_ms.saturating_sub(now_ms).max(1) as u64,
-                    "requiresAck": true,
-                    "payloadBase64": encode(&payload),
-                })
-            }
-        };
-        Ok(value)
-    }
-
-    /// Converts one private Apple event to the semantic event model. Apple
-    /// diagnostics and acknowledgement-only events intentionally return `None`.
-    pub fn event_from_value(value: Value) -> Result<Option<BluetoothEvent>, AppleWireError> {
-        let event: AppleEvent = serde_json::from_value(value).map_err(|error| {
-            AppleWireError::new(format!("invalid Bluetooth Apple event: {error}"))
-        })?;
-        let request_id = event
-            .request_id
-            .as_deref()
-            .map(request_from_apple)
-            .transpose()?;
-        let result = match event.event_type.as_str() {
-            "commandCompleted" => match event.fields.get("command").map(String::as_str) {
-                Some("start") => Some(BluetoothEvent::Started {
-                    request_id: required(request_id, "requestID")?,
-                }),
-                Some("stop") => Some(BluetoothEvent::Stopped {
-                    request_id: required(request_id, "requestID")?,
-                }),
-                _ => None,
-            },
-            "peerDiscovered" => Some(BluetoothEvent::PeerDiscovered {
-                peer_id: PeerId::from_string(required(
-                    event.fields.get("platformID").cloned(),
-                    "fields.platformID",
-                )?),
-                handle: PeerHandle(required(event.peer_handle, "peerHandle")?),
-            }),
-            "peerConnected" | "peerReady" => {
-                let handle = required(event.peer_handle, "peerHandle")?;
-                Some(BluetoothEvent::Connected {
-                    request_id: request_id.unwrap_or_else(|| {
-                        RequestId::from_string(format!("apple_bluetooth_connected_{handle}"))
-                    }),
-                    handle: PeerHandle(handle),
-                })
-            }
-            "peerDisconnected" => Some(BluetoothEvent::Disconnected {
-                handle: PeerHandle(required(event.peer_handle, "peerHandle")?),
-                reason: event
-                    .error
-                    .or_else(|| event.fields.get("role").cloned())
-                    .unwrap_or_else(|| "disconnected".to_owned()),
-            }),
-            "controlReceived" => {
-                let bytes = decode(required(event.payload_base64, "payloadBase64")?.as_str())?;
-                let control: ControlPayload = serde_json::from_slice(&bytes).map_err(|error| {
-                    AppleWireError::new(format!("invalid BLE control payload: {error}"))
-                })?;
-                Some(BluetoothEvent::ControlReceived {
-                    handle: PeerHandle(required(event.peer_handle, "peerHandle")?),
-                    control_kind: control.kind,
-                    payload: decode(&control.payload_base64)?,
-                })
-            }
-            "controlQueued" => Some(BluetoothEvent::ControlSent {
-                request_id: required(request_id, "requestID")?,
-            }),
-            "commandFailed"
-            | "peerConnectionFailed"
-            | "gattError"
-            | "transportError"
-            | "controlExpired" => Some(BluetoothEvent::Failed {
-                request_id,
-                code: event.event_type.clone(),
-                message: event.error.unwrap_or_else(|| {
-                    event.message_id.map_or_else(
-                        || event.event_type.clone(),
-                        |id| format!("message {id} expired"),
-                    )
-                }),
-                retryable: event.event_type != "commandFailed"
-                    && event.event_type != "controlExpired",
-            }),
-            // State, advertisements, snapshots and ACK telemetry are diagnostics.
-            _ => None,
-        };
-        Ok(result)
-    }
-
-    fn encode(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
-
-    fn decode(text: &str) -> Result<Vec<u8>, AppleWireError> {
-        base64::engine::general_purpose::STANDARD
-            .decode(text)
-            .map_err(|error| {
-                AppleWireError::new(format!("invalid padded RFC 4648 base64: {error}"))
-            })
-    }
-
-    fn required<T>(value: Option<T>, field: &str) -> Result<T, AppleWireError> {
-        value.ok_or_else(|| AppleWireError::new(format!("missing {field}")))
-    }
-
-    fn request_to_apple(request: &RequestId) -> Result<String, AppleWireError> {
-        prefixed_id_to_uuid(request.as_str(), "req_")
-    }
-
-    fn request_from_apple(value: &str) -> Result<RequestId, AppleWireError> {
-        uuid_to_prefixed_id(value, "req_").map(RequestId::from_string)
-    }
-
-    fn prefixed_id_to_uuid(value: &str, prefix: &str) -> Result<String, AppleWireError> {
-        let simple = value.strip_prefix(prefix).unwrap_or(value).replace('-', "");
-        if simple.len() != 32 || !simple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppleWireError::new(format!(
-                "{value} is not a UUID-compatible ID"
-            )));
-        }
-        Ok(format!(
-            "{}-{}-{}-{}-{}",
-            &simple[0..8],
-            &simple[8..12],
-            &simple[12..16],
-            &simple[16..20],
-            &simple[20..32]
-        ))
-    }
-
-    fn uuid_to_prefixed_id(value: &str, prefix: &str) -> Result<String, AppleWireError> {
-        let simple = value.replace('-', "").to_ascii_lowercase();
-        if simple.len() != 32 || !simple.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(AppleWireError::new(format!("{value} is not a UUID")));
-        }
-        Ok(format!("{prefix}{simple}"))
-    }
-
-    fn stable_sequence(value: &str) -> u64 {
-        value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    fn start(&self, request_id: String) -> Result<(), BluetoothBackendError> {
+        self.record(BluetoothBackendCommand::Start {
+            request_id: RequestId::from_string(request_id),
         })
     }
 
-    fn unix_time_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |duration| {
-                i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
-            })
+    fn stop(&self, request_id: String) -> Result<(), BluetoothBackendError> {
+        self.record(BluetoothBackendCommand::Stop {
+            request_id: RequestId::from_string(request_id),
+        })
+    }
+
+    fn connect(&self, request_id: String, handle: u64) -> Result<(), BluetoothBackendError> {
+        self.record(BluetoothBackendCommand::Connect {
+            request_id: RequestId::from_string(request_id),
+            handle: PeerHandle(handle),
+        })
+    }
+
+    fn disconnect(&self, request_id: String, handle: u64) -> Result<(), BluetoothBackendError> {
+        self.record(BluetoothBackendCommand::Disconnect {
+            request_id: RequestId::from_string(request_id),
+            handle: PeerHandle(handle),
+        })
+    }
+
+    fn send_packet(
+        &self,
+        request_id: String,
+        handle: u64,
+        packet: Vec<u8>,
+    ) -> Result<(), BluetoothBackendError> {
+        self.record(BluetoothBackendCommand::SendPacket {
+            request_id: RequestId::from_string(request_id),
+            handle: PeerHandle(handle),
+            packet,
+        })
+    }
+
+    fn shutdown(&self) -> Result<(), BluetoothBackendError> {
+        let mut state = self.state.lock().expect("fake Bluetooth state poisoned");
+        state.is_shutdown = true;
+        state.event_sink = None;
+        Ok(())
+    }
+}
+
+type BluetoothHandler = Arc<dyn Fn(BluetoothEvent) + Send + Sync + 'static>;
+
+#[derive(Default)]
+struct BluetoothRuntimeState {
+    codec: BluetoothControlCodec,
+    handler: Option<BluetoothHandler>,
+    /// Maps native packet request IDs back to their logical control request.
+    /// `None` represents an internally generated ACK packet.
+    packet_requests: HashMap<RequestId, Option<RequestId>>,
+}
+
+/// Rust-side module runtime between domain commands and the raw native BLE
+/// backend. This is where the BLE control wire protocol terminates.
+pub struct BluetoothRuntime {
+    backend: Arc<dyn BluetoothBackend>,
+    state: Mutex<BluetoothRuntimeState>,
+}
+
+impl BluetoothRuntime {
+    #[must_use]
+    pub fn new(backend: Arc<dyn BluetoothBackend>) -> Arc<Self> {
+        Arc::new(Self {
+            backend,
+            state: Mutex::new(BluetoothRuntimeState::default()),
+        })
+    }
+
+    pub fn attach_event_handler(
+        self: &Arc<Self>,
+        handler: BluetoothHandler,
+    ) -> Result<(), BluetoothBackendError> {
+        self.state
+            .lock()
+            .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
+            .handler = Some(handler);
+        let weak = Arc::downgrade(self);
+        self.backend
+            .attach_event_sink(BluetoothEventSink::new(Arc::new(move |event| {
+                if let Some(runtime) = Weak::upgrade(&weak) {
+                    runtime.handle_backend_event(event);
+                }
+            })))
+    }
+
+    pub fn dispatch(
+        &self,
+        command: BluetoothCommand,
+        now_ms: i64,
+    ) -> Result<(), BluetoothBackendError> {
+        match command {
+            BluetoothCommand::Start { request_id } => self.backend.start(request_id.to_string()),
+            BluetoothCommand::Stop { request_id } => self.backend.stop(request_id.to_string()),
+            BluetoothCommand::Connect {
+                request_id, handle, ..
+            } => self.backend.connect(request_id.to_string(), handle.0),
+            BluetoothCommand::Disconnect { request_id, handle } => {
+                self.backend.disconnect(request_id.to_string(), handle.0)
+            }
+            BluetoothCommand::SendControl {
+                request_id,
+                handle,
+                message,
+                expires_at_ms,
+            } => {
+                let maximum_packet_bytes = self.maximum_packet_bytes()?;
+                let packets = self
+                    .state
+                    .lock()
+                    .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
+                    .codec
+                    .encode_control(
+                        request_id.clone(),
+                        message,
+                        now_ms,
+                        expires_at_ms,
+                        maximum_packet_bytes,
+                    )
+                    .map_err(protocol_error)?;
+                if let Err(error) = self.send_packets(handle, packets, Some(request_id.clone())) {
+                    if let Ok(mut state) = self.state.lock() {
+                        state.codec.cancel(&request_id);
+                    }
+                    return Err(error);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn shutdown(&self) -> Result<(), BluetoothBackendError> {
+        if let Ok(mut state) = self.state.lock() {
+            state.handler = None;
+            state.packet_requests.clear();
+        }
+        self.backend.shutdown()
+    }
+
+    fn maximum_packet_bytes(&self) -> Result<usize, BluetoothBackendError> {
+        let advertised = self.backend.capabilities()?.max_packet_bytes as usize;
+        if advertised == 0 {
+            return Err(backend_error(
+                "Bluetooth backend advertised a zero packet size",
+            ));
+        }
+        Ok(advertised.min(BLUETOOTH_DEFAULT_PACKET_BYTES))
+    }
+
+    fn send_packets(
+        &self,
+        handle: PeerHandle,
+        packets: Vec<Vec<u8>>,
+        logical_request: Option<RequestId>,
+    ) -> Result<(), BluetoothBackendError> {
+        for packet in packets {
+            let packet_request = RequestId::new();
+            self.state
+                .lock()
+                .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
+                .packet_requests
+                .insert(packet_request.clone(), logical_request.clone());
+            if let Err(error) =
+                self.backend
+                    .send_packet(packet_request.to_string(), handle.0, packet)
+            {
+                if let Ok(mut state) = self.state.lock() {
+                    state.packet_requests.remove(&packet_request);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn handle_backend_event(&self, event: BluetoothBackendEvent) {
+        match event {
+            BluetoothBackendEvent::Started { request_id } => {
+                self.emit(BluetoothEvent::Started { request_id });
+            }
+            BluetoothBackendEvent::Stopped { request_id } => {
+                self.emit(BluetoothEvent::Stopped { request_id });
+            }
+            BluetoothBackendEvent::PeerDiscovered { peer_id, handle } => {
+                self.emit(BluetoothEvent::PeerDiscovered { peer_id, handle });
+            }
+            BluetoothBackendEvent::Connected { request_id, handle } => {
+                self.emit(BluetoothEvent::Connected { request_id, handle });
+            }
+            BluetoothBackendEvent::Disconnected { handle, reason } => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.codec.remove_peer(handle.0);
+                }
+                self.emit(BluetoothEvent::Disconnected { handle, reason });
+            }
+            BluetoothBackendEvent::PacketReceived { handle, packet } => {
+                self.handle_packet(handle, packet);
+            }
+            BluetoothBackendEvent::PacketSent { request_id } => {
+                if let Ok(mut state) = self.state.lock() {
+                    state.packet_requests.remove(&request_id);
+                }
+            }
+            BluetoothBackendEvent::Failed {
+                request_id,
+                code,
+                message,
+                retryable,
+            } => {
+                let request_id = request_id.and_then(|request_id| {
+                    let mapped = self
+                        .state
+                        .lock()
+                        .ok()
+                        .and_then(|mut state| state.packet_requests.remove(&request_id));
+                    match mapped {
+                        Some(logical) => logical,
+                        None => Some(request_id),
+                    }
+                });
+                self.emit(BluetoothEvent::Failed {
+                    request_id,
+                    code,
+                    message,
+                    retryable,
+                });
+            }
+        }
+    }
+
+    fn handle_packet(&self, handle: PeerHandle, packet: Vec<u8>) {
+        let maximum_packet_bytes = match self.maximum_packet_bytes() {
+            Ok(value) => value,
+            Err(error) => {
+                self.emit_failure(None, "capabilityError", error.to_string(), false);
+                return;
+            }
+        };
+        let now_ms = unix_now_ms();
+        let actions = match self
+            .state
+            .lock()
+            .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))
+            .and_then(|mut state| {
+                state
+                    .codec
+                    .ingest_packet(handle.0, &packet, now_ms, maximum_packet_bytes)
+                    .map_err(protocol_error)
+            }) {
+            Ok(actions) => actions,
+            Err(error) => {
+                self.emit_failure(None, "transportError", error.to_string(), true);
+                return;
+            }
+        };
+        for action in actions {
+            match action {
+                BluetoothControlAction::ControlReceived {
+                    peer_handle,
+                    message,
+                } => self.emit(BluetoothEvent::ControlReceived {
+                    handle: PeerHandle(peer_handle),
+                    message,
+                }),
+                BluetoothControlAction::SendPacket {
+                    peer_handle,
+                    packet,
+                } => {
+                    if let Err(error) =
+                        self.send_packets(PeerHandle(peer_handle), vec![packet], None)
+                    {
+                        self.emit_failure(None, "ackFailed", error.to_string(), true);
+                    }
+                }
+                BluetoothControlAction::ControlAcknowledged { request_id } => {
+                    self.emit(BluetoothEvent::ControlSent { request_id });
+                }
+                BluetoothControlAction::Expired { message_id, .. } => self.emit_failure(
+                    None,
+                    "controlExpired",
+                    format!("BLE control message {message_id} expired"),
+                    false,
+                ),
+            }
+        }
+    }
+
+    fn emit(&self, event: BluetoothEvent) {
+        let handler = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.handler.clone());
+        if let Some(handler) = handler {
+            handler(event);
+        }
+    }
+
+    fn emit_failure(
+        &self,
+        request_id: Option<RequestId>,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+    ) {
+        self.emit(BluetoothEvent::Failed {
+            request_id,
+            code: code.into(),
+            message: message.into(),
+            retryable,
+        });
+    }
+}
+
+fn unix_now_ms() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+fn protocol_error(error: impl std::fmt::Display) -> BluetoothBackendError {
+    BluetoothBackendError::Protocol {
+        message: error.to_string(),
+    }
+}
+
+fn backend_error(error: impl std::fmt::Display) -> BluetoothBackendError {
+    BluetoothBackendError::Backend {
+        message: error.to_string(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine as _;
 
     #[test]
-    fn fake_backend_keeps_submission_asynchronous() {
-        let mut backend = FakeBluetoothBackend::default();
-        let command = BluetoothCommand::Start {
-            request_id: RequestId::from("start"),
-        };
-        backend.submit(command.clone());
-        assert_eq!(backend.commands(), &[command]);
-        assert!(backend.poll_event().is_none());
-        backend.inject(BluetoothEvent::Started {
-            request_id: RequestId::from("start"),
-        });
-        assert!(matches!(
-            backend.poll_event(),
-            Some(BluetoothEvent::Started { .. })
-        ));
-    }
-
-    #[test]
-    fn apple_wire_contract_wraps_control_payload_and_uses_type_tag() {
-        let command = BluetoothCommand::SendControl {
-            request_id: RequestId::from("req_00112233445566778899aabbccddeeff"),
-            handle: PeerHandle(7),
-            control_kind: "precisionRequest".into(),
-            payload: vec![1, 2, 3],
-            expires_at_ms: 31_000,
-        };
-        let json = apple_wire::command_to_value_at(&command, 1_000).expect("valid command");
-        assert_eq!(json["type"], "sendControl");
-        assert_eq!(json["requestID"], "00112233-4455-6677-8899-aabbccddeeff");
-        assert_eq!(json["ttlMillis"], 30_000);
-        assert_eq!(json["peerHandle"], 7);
-        assert!(json.get("kind").is_none());
-
-        let private_payload = base64::engine::general_purpose::STANDARD
-            .decode(json["payloadBase64"].as_str().expect("base64 text"))
-            .expect("padded base64");
-        let private_payload: serde_json::Value =
-            serde_json::from_slice(&private_payload).expect("control envelope");
-        assert_eq!(private_payload["kind"], "precisionRequest");
-        assert_eq!(private_payload["payloadBase64"], "AQID");
-    }
-
-    #[test]
-    fn apple_wire_contract_decodes_control_and_failure() {
-        let inner = serde_json::json!({
-            "kind": "hello",
-            "payloadBase64": "AQI="
-        });
-        let encoded = base64::engine::general_purpose::STANDARD
-            .encode(serde_json::to_vec(&inner).expect("inner JSON"));
-        let event = apple_wire::event_from_value(serde_json::json!({
-            "type": "controlReceived",
-            "peerHandle": 2,
-            "payloadBase64": encoded
-        }))
-        .expect("valid event")
-        .expect("semantic event");
-        assert!(matches!(
-            event,
-            BluetoothEvent::ControlReceived { control_kind, payload, .. }
-                if control_kind == "hello" && payload == [1, 2]
-        ));
-
-        let failed = apple_wire::event_from_value(serde_json::json!({
-            "type": "commandFailed",
-            "requestID": "00112233-4455-6677-8899-aabbccddeeff",
-            "error": "bad"
-        }))
-        .expect("valid failure");
-        assert!(
-            matches!(failed, Some(BluetoothEvent::Failed { code, .. }) if code == "commandFailed")
+    fn fake_backend_records_only_platform_packet_operations() {
+        let backend = FakeBluetoothBackend::default();
+        let sink = BluetoothEventSink::new(Arc::new(|_| {}));
+        backend.attach_event_sink(sink).unwrap();
+        backend
+            .send_packet("packet-one".into(), 4, vec![1, 2, 3])
+            .unwrap();
+        assert_eq!(
+            backend.commands(),
+            [BluetoothBackendCommand::SendPacket {
+                request_id: RequestId::from("packet-one"),
+                handle: PeerHandle(4),
+                packet: vec![1, 2, 3],
+            }]
         );
     }
+
+    #[test]
+    fn runtime_materializes_control_and_ack_entirely_in_rust() {
+        let sender_backend = Arc::new(FakeBluetoothBackend::default());
+        let receiver_backend = Arc::new(FakeBluetoothBackend::default());
+        let sender = BluetoothRuntime::new(sender_backend.clone());
+        let receiver = BluetoothRuntime::new(receiver_backend.clone());
+        let sender_events = Arc::new(Mutex::new(Vec::new()));
+        let receiver_events = Arc::new(Mutex::new(Vec::new()));
+        let sender_events_for_handler = sender_events.clone();
+        sender
+            .attach_event_handler(Arc::new(move |event| {
+                sender_events_for_handler.lock().unwrap().push(event);
+            }))
+            .unwrap();
+        let receiver_events_for_handler = receiver_events.clone();
+        receiver
+            .attach_event_handler(Arc::new(move |event| {
+                receiver_events_for_handler.lock().unwrap().push(event);
+            }))
+            .unwrap();
+
+        let logical_request = RequestId::new();
+        let message = BluetoothControlMessage::JoinHello {
+            payload: vec![9; 500],
+        };
+        let now_ms = unix_now_ms();
+        sender
+            .dispatch(
+                BluetoothCommand::SendControl {
+                    request_id: logical_request.clone(),
+                    handle: PeerHandle(8),
+                    message: message.clone(),
+                    expires_at_ms: now_ms.saturating_add(10_000),
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let packets: Vec<_> = sender_backend
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                BluetoothBackendCommand::SendPacket { packet, .. } => Some(packet),
+                _ => None,
+            })
+            .collect();
+        assert!(packets.len() > 1);
+        for packet in packets {
+            receiver_backend
+                .inject(BluetoothBackendEvent::PacketReceived {
+                    handle: PeerHandle(8),
+                    packet,
+                })
+                .unwrap();
+        }
+        assert!(receiver_events
+            .lock()
+            .unwrap()
+            .contains(&BluetoothEvent::ControlReceived {
+                handle: PeerHandle(8),
+                message,
+            }));
+
+        let ack = receiver_backend
+            .commands()
+            .into_iter()
+            .find_map(|command| match command {
+                BluetoothBackendCommand::SendPacket { packet, .. } => Some(packet),
+                _ => None,
+            })
+            .expect("receiver generated ACK packet");
+        sender_backend
+            .inject(BluetoothBackendEvent::PacketReceived {
+                handle: PeerHandle(8),
+                packet: ack,
+            })
+            .unwrap();
+        assert!(sender_events
+            .lock()
+            .unwrap()
+            .contains(&BluetoothEvent::ControlSent {
+                request_id: logical_request,
+            }));
+    }
 }
+
+uniffi::setup_scaffolding!();

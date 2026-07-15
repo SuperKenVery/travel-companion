@@ -6,7 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-base64.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tc-model = { path = "../../crates/tc-model" }
+tc-protocol = { path = "../../crates/tc-protocol" }
+thiserror.workspace = true
+uniffi.workspace = true

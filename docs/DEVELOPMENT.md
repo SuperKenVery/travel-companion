@@ -73,7 +73,13 @@ xcodegen generate
 ./scripts/build-rust-ios.sh Release
 ```
 
-脚本使用 Fenix 提供的 iOS Rust target，并使用主机 iPhoneOS SDK 的 clang/SQLite。产物写入 `build/ios/<Configuration>/libtc_app_ffi.a`；`build/` 和 `target/` 都是生成目录。
+脚本使用 Fenix 提供的 iOS Rust target，并使用主机 iPhoneOS SDK 的 clang/SQLite。产物写入 `build/ios/<Configuration>/libtc_app_ffi.a`，随后从该静态库重新生成 `bindings/tc-app-ffi/generated/` 下的 Swift sources 与 C headers。`build/` 和 `target/` 都是生成目录；UniFFI 生成文件是 Xcode 编译输入，修改 Rust export 后不要手工编辑它们。
+
+只需从已有 host 静态库刷新 binding 时可运行：
+
+```sh
+./scripts/generate-uniffi-swift.sh target/debug/libtc_app_ffi.a
+```
 
 ## Xcode 与真机
 
