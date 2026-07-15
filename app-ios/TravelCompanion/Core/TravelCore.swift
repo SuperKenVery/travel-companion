@@ -27,7 +27,6 @@ final class TravelCore {
                 guard let self, self.binding != nil else { return }
                 do {
                     try self.applyReply(replyJSON)
-                    self.lastError = nil
                 } catch {
                     self.lastError = Self.errorPayload(from: error)
                 }
@@ -67,6 +66,7 @@ final class TravelCore {
         }
         guard let binding else { return }
 
+        lastError = nil
         isProcessing = true
         defer { isProcessing = false }
 
@@ -74,10 +74,33 @@ final class TravelCore {
             let json = try Self.string(from: Self.encoder.encode(command))
             let response = binding.dispatchJson(commandJson: json)
             try applyReply(response)
-            lastError = nil
         } catch {
             lastError = Self.errorPayload(from: error)
         }
+    }
+
+    /// Joining is an asynchronous BLE handshake. Dispatch success only means
+    /// discovery started, so keep the caller waiting for a group snapshot,
+    /// an asynchronous backend/core error, or an explicit discovery timeout.
+    func joinGroup(pin: String, timeout: TimeInterval = 30) async -> CoreErrorPayload? {
+        await send(.joinGroup(pin: pin))
+        if let lastError { return lastError }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if snapshot.group != nil { return nil }
+            if let lastError { return lastError }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+            } catch {
+                return CoreErrorPayload(code: "joinCancelled", message: "加入已取消，请重试。")
+            }
+        }
+
+        return CoreErrorPayload(
+            code: "groupNotFound",
+            message: "附近没有找到可加入的群组。请确认群主停留在群组页面、两台 iPhone 的蓝牙已开启，并检查 6 位 PIN 后重试。"
+        )
     }
 
     func refresh() async {

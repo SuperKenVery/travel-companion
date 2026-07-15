@@ -91,7 +91,7 @@ struct JoinGroupSheet: View {
             } header: {
                 Text("面对面入群")
             } footer: {
-                Text("请靠近群主设备并保持蓝牙开启。PIN 只用于建立经过认证的本地群组连接。")
+                Text("请靠近群主设备并保持两台 iPhone 的蓝牙开启。最多等待 30 秒；找不到群组或握手失败时会在这里提示。")
             }
 
             if let submissionError {
@@ -121,9 +121,9 @@ struct JoinGroupSheet: View {
         isSubmitting = true
         submissionError = nil
         Task {
-            await core.send(.joinGroup(pin: pin))
+            let error = await core.joinGroup(pin: pin)
             isSubmitting = false
-            if let error = core.lastError {
+            if let error {
                 submissionError = error.message
             } else {
                 dismiss()

@@ -48,6 +48,7 @@ nix develop --command ./scripts/check.sh
 
 - 保持 Swift 6 严格并发无警告和 Rust Clippy warnings as errors。
 - 协议、持久化和跨边界改动应覆盖重复、乱序、过期、丢失、重连与失败路径。
+- 真机排障优先按 `docs/DEVELOPMENT.md` 的“真机日志”流程分别拉取各设备的 tracing 滚动文件；日志只写 OSLog/文件，不写数据库，不要恢复 diagnostics snapshot 或持久化日志 entry。
 - 报告中区分“存在测试”“本次检查通过”和“真机验收通过”；实现进度只更新 `docs/IMPLEMENTATION_STATUS.md`。
 - 不提交 `target/`、`build/`、`DerivedData/` 或生成的正式 `.xcodeproj`。
 - 修改前检查 `git status`；只触碰任务所需文件，不覆盖、回滚或格式化用户的无关改动。

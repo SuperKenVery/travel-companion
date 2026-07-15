@@ -1,12 +1,12 @@
 //! Versioned peer wire messages and an incremental length-delimited codec.
 
-use model::{EventEnvelope, EventId, GroupId, PeerId, RequestId, SyncDigest};
+use model::{EventId, GroupId, PeerId, RequestId, SignedEvent, SyncDigest};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const DEFAULT_MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const BLUETOOTH_PROTOCOL_VERSION: u8 = 1;
 pub const BLUETOOTH_MAX_CONTROL_PAYLOAD_BYTES: usize = 4_096;
@@ -27,7 +27,7 @@ pub enum WireMessage {
     EventBatch {
         protocol_version: u16,
         request_id: RequestId,
-        events: Vec<EventEnvelope>,
+        events: Vec<SignedEvent>,
     },
     PersistedAck {
         protocol_version: u16,
@@ -690,6 +690,26 @@ mod tests {
             FrameDecoder::default().push(&bytes).unwrap(),
             vec![request, chunk]
         );
+    }
+
+    #[test]
+    fn event_batch_preserves_authenticated_event_bytes_exactly() {
+        let signed = SignedEvent {
+            signer_id: PeerId::from("a"),
+            event_bytes: br#"{"payload":{"longitude":113.89049500316887}}"#.to_vec(),
+            signature: vec![7; 64],
+        };
+        let message = WireMessage::EventBatch {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::from("events"),
+            events: vec![signed],
+        };
+
+        let decoded = FrameDecoder::default()
+            .push(&encode_frame(&message).unwrap())
+            .unwrap();
+
+        assert_eq!(decoded, vec![message]);
     }
 
     #[test]

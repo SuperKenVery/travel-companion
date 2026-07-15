@@ -12,7 +12,6 @@ struct AppSnapshot: Codable, Sendable, Equatable {
     var document: DocumentSnapshot
     var activeCall: CallSnapshot?
     var pendingPrecisionRequests: [PrecisionRequestSnapshot]
-    var diagnostics: DiagnosticsSnapshot
 
     static let empty = AppSnapshot(
         protocolVersion: 1,
@@ -25,8 +24,7 @@ struct AppSnapshot: Codable, Sendable, Equatable {
         places: [],
         document: .empty,
         activeCall: nil,
-        pendingPrecisionRequests: [],
-        diagnostics: .empty
+        pendingPrecisionRequests: []
     )
 }
 
@@ -221,38 +219,6 @@ struct PrecisionRequestSnapshot: Codable, Sendable, Equatable, Identifiable {
     var createdAt: Date
     var expiresAt: Date
     var state: String
-}
-
-struct DiagnosticsSnapshot: Codable, Sendable, Equatable {
-    var bleState: String
-    var transportState: String
-    var locationState: String
-    var rangingState: String
-    var eventCount: UInt64
-    var pendingReplicationCount: UInt64
-    var connectedPeerCount: Int
-    var lastSyncAt: Date?
-    var recentEvents: [DiagnosticEventSnapshot]
-
-    static let empty = DiagnosticsSnapshot(
-        bleState: "idle",
-        transportState: "idle",
-        locationState: "idle",
-        rangingState: "idle",
-        eventCount: 0,
-        pendingReplicationCount: 0,
-        connectedPeerCount: 0,
-        lastSyncAt: nil,
-        recentEvents: []
-    )
-}
-
-struct DiagnosticEventSnapshot: Codable, Sendable, Equatable, Identifiable {
-    var id: String
-    var timestamp: Date
-    var subsystem: String
-    var level: String
-    var message: String
 }
 
 enum MediaKind: String, Codable, Sendable {

@@ -1,11 +1,17 @@
 @preconcurrency import CoreBluetooth
 import Foundation
+import OSLog
+
+private let bluetoothLogger = Logger(
+    subsystem: "com.travelcompanion.app",
+    category: "BluetoothAdmission"
+)
 
 public enum BluetoothEvent: Sendable, Equatable {
     case started(requestID: String)
     case stopped(requestID: String)
     case peerDiscovered(peerID: String, handle: UInt64)
-    case connected(requestID: String, handle: UInt64)
+    case connected(requestID: String, handle: UInt64, maxPacketBytes: UInt32)
     case disconnected(handle: UInt64, reason: String)
     case packetReceived(handle: UInt64, packet: Data)
     case packetSent(requestID: String)
@@ -90,9 +96,11 @@ public final class BluetoothAppleBackend: NSObject {
 
     public func start(requestID: String) {
         guard !isRunning else {
+            bluetoothLogger.debug("BLE start reused existing runtime; request=\(requestID, privacy: .public)")
             emit(.started(requestID: requestID))
             return
         }
+        bluetoothLogger.notice("Starting BLE admission runtime; request=\(requestID, privacy: .public)")
         isRunning = true
         centralManager = CBCentralManager(
             delegate: self,
@@ -150,7 +158,20 @@ public final class BluetoothAppleBackend: NSObject {
 
     private func connectOperation(requestID: String, handle: UInt64) throws {
         if readyHandles.contains(handle) {
-            emit(.connected(requestID: requestID, handle: handle))
+            guard let maximum = negotiatedPacketBytes(for: handle) else {
+                fail(
+                    requestID: requestID,
+                    code: "mtuUnavailable",
+                    message: "BLE channel is ready but its negotiated packet size is unavailable",
+                    retryable: true
+                )
+                return
+            }
+            emit(.connected(
+                requestID: requestID,
+                handle: handle,
+                maxPacketBytes: UInt32(maximum)
+            ))
             return
         }
 
@@ -179,8 +200,14 @@ public final class BluetoothAppleBackend: NSObject {
         handle: UInt64,
         packet: Data
     ) {
+        bluetoothLogger.debug(
+            "Dispatching BLE packet to CoreBluetooth; request=\(requestID, privacy: .public) handle=\(handle) bytes=\(packet.count)"
+        )
         do {
             try sendPacketOperation(handle: handle, packet: packet)
+            bluetoothLogger.debug(
+                "CoreBluetooth accepted BLE packet; request=\(requestID, privacy: .public) handle=\(handle) bytes=\(packet.count)"
+            )
             emit(.packetSent(requestID: requestID))
         } catch {
             fail(
@@ -243,7 +270,39 @@ public final class BluetoothAppleBackend: NSObject {
     private func markReady(_ handle: UInt64) {
         readyHandles.insert(handle)
         guard let requestID = pendingConnectRequests.removeValue(forKey: handle) else { return }
-        emit(.connected(requestID: requestID, handle: handle))
+        guard let maximum = negotiatedPacketBytes(for: handle) else {
+            fail(
+                requestID: requestID,
+                code: "mtuUnavailable",
+                message: "BLE channel became ready without a negotiated packet size",
+                retryable: true
+            )
+            return
+        }
+        bluetoothLogger.notice(
+            "BLE application channel ready; handle=\(handle) maxPacketBytes=\(maximum)"
+        )
+        emit(.connected(
+            requestID: requestID,
+            handle: handle,
+            maxPacketBytes: UInt32(maximum)
+        ))
+    }
+
+    private func negotiatedPacketBytes(for target: UInt64) -> Int? {
+        var limits: [Int] = []
+        if let peripheral = peripherals[target],
+           let characteristic = writableCharacteristics[target]
+        {
+            let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse)
+                ? .withoutResponse
+                : .withResponse
+            limits.append(peripheral.maximumWriteValueLength(for: writeType))
+        }
+        if let central = subscribedCentrals[target] {
+            limits.append(central.maximumUpdateValueLength)
+        }
+        return limits.min().map { min($0, Self.maximumPacketBytes) }
     }
 
     private func sendPacketOperation(handle target: UInt64, packet: Data) throws {
@@ -256,7 +315,9 @@ public final class BluetoothAppleBackend: NSObject {
             guard let peripheral = peripherals[handle], peripheral.state == .connected else { continue }
             let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
             let maximum = peripheral.maximumWriteValueLength(for: writeType)
-            guard packet.count <= maximum else { throw BackendError.mtuTooSmall }
+            guard packet.count <= maximum else {
+                throw BackendError.mtuTooSmall(packet: packet.count, maximum: maximum)
+            }
             if writeType == .withoutResponse {
                 pendingCentralWrites[handle, default: []].append(packet)
             } else {
@@ -269,7 +330,10 @@ public final class BluetoothAppleBackend: NSObject {
         if let peripheralManager, let characteristic = controlCharacteristic {
             for (handle, central) in subscribedCentrals where target == handle {
                 guard packet.count <= central.maximumUpdateValueLength else {
-                    throw BackendError.mtuTooSmall
+                    throw BackendError.mtuTooSmall(
+                        packet: packet.count,
+                        maximum: central.maximumUpdateValueLength
+                    )
                 }
                 if !peripheralManager.updateValue(packet, for: characteristic, onSubscribedCentrals: [central]) {
                     pendingNotifications.append(.init(data: packet, central: central))
@@ -300,6 +364,7 @@ public final class BluetoothAppleBackend: NSObject {
     }
 
     private func receive(_ packet: Data, from peerHandle: UInt64) {
+        bluetoothLogger.debug("Received BLE packet; handle=\(peerHandle) bytes=\(packet.count)")
         emit(.packetReceived(handle: peerHandle, packet: packet))
     }
 
@@ -313,6 +378,9 @@ public final class BluetoothAppleBackend: NSObject {
         message: String,
         retryable: Bool
     ) {
+        bluetoothLogger.error(
+            "BLE failure; request=\(requestID ?? "none", privacy: .public) code=\(code, privacy: .public) retryable=\(retryable) message=\(message, privacy: .public)"
+        )
         emit(.failed(
             requestID: requestID,
             code: code,
@@ -322,12 +390,14 @@ public final class BluetoothAppleBackend: NSObject {
     }
 
     fileprivate enum BackendError: Error, CustomStringConvertible {
-        case packetTooLarge, peerUnavailable, mtuTooSmall
+        case packetTooLarge, peerUnavailable
+        case mtuTooSmall(packet: Int, maximum: Int)
         var description: String {
             switch self {
             case .packetTooLarge: "BLE packet exceeds the advertised platform packet limit"
             case .peerUnavailable: "requested BLE peer is unavailable"
-            case .mtuTooSmall: "negotiated BLE MTU is too small"
+            case let .mtuTooSmall(packet, maximum):
+                "BLE packet length \(packet) exceeds negotiated maximum \(maximum)"
             }
         }
     }
@@ -347,12 +417,14 @@ private extension Error {
 
 extension BluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
     public func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        bluetoothLogger.notice("Central state changed to \(central.state.rawValue)")
         guard isRunning, central.state == .poweredOn else { return }
         central.scanForPeripherals(withServices: [Self.serviceUUID], options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
     }
 
     public func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         let handle = handle(for: peripheral.identifier)
+        bluetoothLogger.debug("Discovered BLE peer; handle=\(handle) rssi=\(RSSI.intValue)")
         peripherals[handle] = peripheral
         peripheral.delegate = self
         if peripheral.state == .disconnected {
@@ -362,6 +434,7 @@ extension BluetoothAppleBackend: @preconcurrency CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         let handle = handle(for: peripheral.identifier)
+        bluetoothLogger.notice("Connected BLE peer; handle=\(handle); discovering GATT service")
         peripherals[handle] = peripheral
         peripheral.delegate = self
         peripheral.discoverServices([Self.serviceUUID])
@@ -471,6 +544,7 @@ extension BluetoothAppleBackend: @preconcurrency CBPeripheralDelegate {
 
 extension BluetoothAppleBackend: @preconcurrency CBPeripheralManagerDelegate {
     public func peripheralManagerDidUpdateState(_ peripheral: CBPeripheralManager) {
+        bluetoothLogger.notice("Peripheral state changed to \(peripheral.state.rawValue)")
         guard isRunning, peripheral.state == .poweredOn else { return }
         configurePeripheralService()
     }
@@ -485,12 +559,14 @@ extension BluetoothAppleBackend: @preconcurrency CBPeripheralManagerDelegate {
             return
         }
         if !peripheral.isAdvertising {
+            bluetoothLogger.notice("Published BLE admission service; starting advertisement")
             peripheral.startAdvertising([CBAdvertisementDataServiceUUIDsKey: [Self.serviceUUID]])
         }
     }
 
     public func peripheralManager(_ peripheral: CBPeripheralManager, central: CBCentral, didSubscribeTo characteristic: CBCharacteristic) {
         let handle = handle(for: central.identifier)
+        bluetoothLogger.notice("Central subscribed to BLE control characteristic; handle=\(handle)")
         subscribedCentrals[handle] = central
         markReady(handle)
     }

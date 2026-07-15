@@ -1,5 +1,6 @@
 //! Shared, platform-neutral value types used by every Travel Companion crate.
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -211,24 +212,53 @@ pub struct EventEnvelope {
     pub delivery_policy: DeliveryPolicy,
     pub created_at_ms: i64,
     pub payload: serde_json::Value,
-    #[serde(default)]
-    pub signature: Vec<u8>,
 }
 
 impl EventEnvelope {
-    /// Canonical enough for this protocol: structs have fixed field order and
-    /// all unordered sets/maps are represented by BTree collections.
-    pub fn signing_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
-        let mut unsigned = self.clone();
-        unsigned.signature.clear();
-        serde_json::to_vec(&unsigned)
-    }
-
     #[must_use]
     pub fn is_expired_at(&self, now_ms: i64) -> bool {
         self.delivery_policy
             .expires_at_ms()
             .is_some_and(|deadline| deadline <= now_ms)
+    }
+}
+
+/// Opaque signed event carried by replication and persisted without rewriting
+/// the authenticated bytes. Receivers must verify `event_bytes` before parsing
+/// them as an [`EventEnvelope`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignedEvent {
+    pub signer_id: PeerId,
+    #[serde(with = "base64_bytes")]
+    pub event_bytes: Vec<u8>,
+    #[serde(with = "base64_bytes")]
+    pub signature: Vec<u8>,
+}
+
+impl SignedEvent {
+    pub fn decode_event(&self) -> Result<EventEnvelope, serde_json::Error> {
+        serde_json::from_slice(&self.event_bytes)
+    }
+}
+
+mod base64_bytes {
+    use super::*;
+    use serde::{de::Error as _, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD_NO_PAD.decode(encoded).map_err(D::Error::custom)
     }
 }
 

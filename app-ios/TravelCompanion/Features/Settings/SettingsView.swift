@@ -128,20 +128,6 @@ struct SettingsView: View {
                 )
             }
 
-            #if DEBUG
-            Section {
-                NavigationLink {
-                    DiagnosticsView()
-                } label: {
-                    Label("连接与同步诊断", systemImage: "stethoscope")
-                }
-            } header: {
-                Text("开发")
-            } footer: {
-                Text("此页面仅在 Debug 构建中可见。")
-            }
-            #endif
-
             Section {
                 Button("清除旅行数据", systemImage: "trash", role: .destructive) {
                     isConfirmingClearData = true

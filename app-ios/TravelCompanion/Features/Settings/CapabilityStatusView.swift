@@ -13,36 +13,31 @@ struct CapabilityStatusView: View {
                     title: "蓝牙",
                     detail: "成员发现、控制提示和后台敲门",
                     systemImage: "antenna.radiowaves.left.and.right",
-                    blocker: blocker(matching: ["bluetooth", "蓝牙"]),
-                    fallbackState: snapshot.diagnostics.bleState
+                    blocker: blocker(matching: ["bluetooth", "蓝牙"])
                 )
                 CapabilityRow(
                     title: "本地网络",
                     detail: "Bonjour/AWDL 内容同步和实时音频",
                     systemImage: "network",
-                    blocker: blocker(matching: ["network", "transport", "本地网络"]),
-                    fallbackState: snapshot.diagnostics.transportState
+                    blocker: blocker(matching: ["network", "transport", "本地网络"])
                 )
                 CapabilityRow(
                     title: "位置",
                     detail: "旅行期间的最后位置与后台更新",
                     systemImage: "location.fill",
-                    blocker: blocker(matching: ["location", "位置"]),
-                    fallbackState: snapshot.diagnostics.locationState
+                    blocker: blocker(matching: ["location", "位置"])
                 )
                 CapabilityRow(
                     title: "精确测距",
                     detail: "双方前台并确认后的 UWB 距离与方向",
                     systemImage: "dot.scope",
-                    blocker: blocker(matching: ["ranging", "uwb", "nearby", "精确"]),
-                    fallbackState: snapshot.diagnostics.rangingState
+                    blocker: blocker(matching: ["ranging", "uwb", "nearby", "精确"])
                 )
                 CapabilityRow(
                     title: "本地通知",
                     detail: "后台位置请求、消息和来电提醒",
                     systemImage: "bell.badge.fill",
-                    blocker: blocker(matching: ["notification", "通知"]),
-                    fallbackState: nil
+                    blocker: blocker(matching: ["notification", "通知"])
                 )
             }
 
@@ -89,7 +84,6 @@ private struct CapabilityRow: View {
     let detail: String
     let systemImage: String
     let blocker: CapabilityBlocker?
-    let fallbackState: String?
 
     private var isBlocked: Bool { blocker != nil }
 
@@ -112,7 +106,7 @@ private struct CapabilityRow: View {
             Spacer(minLength: 6)
 
             TCStatusPill(
-                text: isBlocked ? "受限" : displayState,
+                text: isBlocked ? "受限" : "可用",
                 tone: isBlocked ? .warning : .success,
                 systemImage: isBlocked ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"
             )
@@ -120,14 +114,4 @@ private struct CapabilityRow: View {
         .accessibilityElement(children: .combine)
     }
 
-    private var displayState: String {
-        guard let fallbackState, !fallbackState.isEmpty else { return "可用" }
-        switch fallbackState.lowercased() {
-        case "idle": return "待命"
-        case "ready", "poweredon", "available": return "可用"
-        case "active", "connected": return "运行中"
-        default: return fallbackState
-        }
-    }
 }
-

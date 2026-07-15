@@ -10,4 +10,5 @@ serde.workspace = true
 model = { path = "../../crates/model" }
 protocol = { path = "../../crates/protocol" }
 thiserror.workspace = true
+tracing.workspace = true
 uniffi.workspace = true

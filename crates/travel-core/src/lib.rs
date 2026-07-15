@@ -1,6 +1,7 @@
 //! Application coordinator and the only Rust API consumed by the public GUI
 //! binding. Native frameworks are driven through semantic queued module commands.
 
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use bluetooth::{BluetoothCommand, BluetoothControlMessage, BluetoothEvent, PeerHandle};
 use call::{CallMachine, CallSignal, CallState};
 use call_system::{CallSystemCommand, CallSystemEvent};
@@ -24,10 +25,12 @@ use secure_storage::{SecretValue, SecureStorageCommand, SecureStorageEvent};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+
+mod logging;
 use store::{EventStore, StoreError};
 use thiserror::Error;
 
-const STATE_KEY: &str = "travel-core/v1";
+const STATE_KEY: &str = "travel-core/v2";
 const IDENTITY_KEY: &str = "tc.identity.ed25519.v1";
 const GROUP_KEY: &str = "tc.group.current.v1";
 const TRANSPORT_CERTIFICATE_KEY: &str = "tc.transport.certificate.der.v1";
@@ -135,6 +138,7 @@ pub struct LifecycleSnapshot {
     pub sharing_paused: bool,
     pub is_foreground: bool,
     pub blockers: Vec<CapabilityBlocker>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -263,23 +267,6 @@ pub struct PrecisionRequestSnapshot {
     pub status: PrecisionStatus,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticEntry {
-    pub timestamp_ms: i64,
-    pub category: String,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiagnosticsSnapshot {
-    pub entries: Vec<DiagnosticEntry>,
-    pub last_error: Option<String>,
-    pub pending_module_commands: usize,
-    pub resources_path: String,
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -293,7 +280,6 @@ pub struct AppSnapshot {
     pub document: DocumentAppSnapshot,
     pub active_call: Option<CallState>,
     pub pending_precision: Vec<PrecisionRequestSnapshot>,
-    pub diagnostics: DiagnosticsSnapshot,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -450,7 +436,6 @@ struct PersistedState {
     pending_precision: Vec<PrecisionRequestSnapshot>,
     #[serde(default)]
     processed_control_ids: BTreeSet<RequestId>,
-    diagnostics: Vec<DiagnosticEntry>,
 }
 
 impl PersistedState {
@@ -475,7 +460,6 @@ impl PersistedState {
             document_leases: Vec::new(),
             pending_precision: Vec::new(),
             processed_control_ids: BTreeSet::new(),
-            diagnostics: Vec::new(),
         }
     }
 }
@@ -563,8 +547,8 @@ struct JoinHelloPayload {
 #[serde(rename_all = "camelCase")]
 struct AdmissionCredential {
     group: GroupSnapshot,
-    member_public_keys: BTreeMap<PeerId, Vec<u8>>,
-    group_key: Vec<u8>,
+    member_public_keys: BTreeMap<PeerId, String>,
+    group_key: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -578,8 +562,9 @@ struct MembershipSnapshotPayload {
 #[serde(rename_all = "camelCase")]
 struct JoinResponsePayload {
     hello: JoinHello,
-    confirmation: Vec<u8>,
-    sealed_credential: SealedMessage,
+    confirmation: String,
+    sealed_nonce: String,
+    sealed_credential: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -634,6 +619,7 @@ pub struct TravelCore {
 
 impl TravelCore {
     pub fn new(config: CoreConfig) -> Result<Self, CoreError> {
+        logging::initialize(&config.storage_path);
         let state_store = EventStore::open(&config.storage_path)?;
         let resource_store = DiskResourceStore::open(&config.resources_path)?;
         let loaded = state_store.load_state::<PersistedState>(STATE_KEY)?;
@@ -725,6 +711,26 @@ impl TravelCore {
                 },
             )?;
         }
+        let should_restore_admission = core.state.group.as_ref().is_some_and(|group| {
+            group.invite_pin.is_some()
+                && group.members.iter().any(|member| {
+                    member.peer_id == core.state.identity.peer_id
+                        && member.active
+                        && member.role == MemberRole::Owner
+                })
+        });
+        if should_restore_admission {
+            core.queue(
+                "bluetooth",
+                &BluetoothCommand::Start {
+                    request_id: RequestId::new(),
+                },
+            )?;
+            tracing::info!(
+                subsystem = "groupAuth",
+                "restored an active invitation and reopened the BLE admission channel"
+            );
+        }
         for key in [TRANSPORT_CERTIFICATE_KEY, TRANSPORT_PRIVATE_KEY] {
             core.queue(
                 "secureStorage",
@@ -743,6 +749,7 @@ impl TravelCore {
         let result = self.apply_command(command);
         if let Err(error) = &result {
             self.last_error = Some(error.to_string());
+            tracing::error!(subsystem = "core", %error, "command failed");
         }
         result?;
         self.expire_precision();
@@ -793,6 +800,7 @@ impl TravelCore {
         })();
         if let Err(error) = &result {
             self.last_error = Some(error.to_string());
+            tracing::error!(subsystem = "core", %error, "module event failed");
         }
         result?;
         self.expire_precision();
@@ -832,6 +840,7 @@ impl TravelCore {
                 sharing_paused: self.state.sharing_paused,
                 is_foreground: self.state.is_foreground,
                 blockers: self.blockers(),
+                last_error: self.last_error.clone(),
             },
             identity: self.state.identity.clone(),
             group: self.state.group.clone(),
@@ -850,12 +859,6 @@ impl TravelCore {
                 state => Some(state.clone()),
             },
             pending_precision: precision,
-            diagnostics: DiagnosticsSnapshot {
-                entries: self.state.diagnostics.clone(),
-                last_error: self.last_error.clone(),
-                pending_module_commands: self.module_commands.len(),
-                resources_path: self.config.resources_path.clone(),
-            },
         })
     }
 
@@ -1033,6 +1036,19 @@ impl TravelCore {
             },
         )?;
         self.rebuild_replication()?;
+        // A newly created group must be discoverable immediately so another
+        // nearby device can use the PIN shown by the UI. Admission is not a
+        // travel-session-only capability.
+        self.queue(
+            "bluetooth",
+            &BluetoothCommand::Start {
+                request_id: RequestId::new(),
+            },
+        )?;
+        tracing::info!(
+            subsystem = "groupAuth",
+            "created group and opened the BLE admission channel"
+        );
         for handle in self.bluetooth_handles.values().copied().collect::<Vec<_>>() {
             self.send_group_presence(handle)?;
             self.send_invitation_info(handle)?;
@@ -1056,9 +1072,9 @@ impl TravelCore {
                 request_id: RequestId::new(),
             },
         )?;
-        self.diagnostic(
-            "groupAuth",
-            "waiting for a BLE invitation before starting the PIN-authenticated handshake",
+        tracing::info!(
+            subsystem = "groupAuth",
+            "join requested; started BLE and waiting for a nearby invitation"
         );
         Ok(())
     }
@@ -1328,12 +1344,11 @@ impl TravelCore {
                 }
             }
         }
-        self.diagnostic(
-            "location",
-            format!(
-                "BLE location response {}: {:?}",
-                response.request_id, response.status
-            ),
+        tracing::debug!(
+            subsystem = "location",
+            request_id = %response.request_id,
+            status = ?response.status,
+            "BLE location response"
         );
         Ok(())
     }
@@ -1753,7 +1768,7 @@ impl TravelCore {
                 resource.status = ResourceTransferStatus::Failed;
                 resource.last_error = Some(error.to_string());
             }
-            self.diagnostic("resources", format!("rejected resource chunk: {error}"));
+            tracing::error!(subsystem = "resources", %error, "rejected resource chunk");
             return Ok(());
         }
         let (transferred_bytes, _) = transfer.progress()?;
@@ -2130,6 +2145,7 @@ impl TravelCore {
     fn on_bluetooth(&mut self, event: BluetoothEvent) -> Result<(), CoreError> {
         match event {
             BluetoothEvent::PeerDiscovered { peer_id, handle } => {
+                tracing::debug!(subsystem = "groupAuth", ?handle, "BLE peer discovered");
                 self.bluetooth_handles.insert(peer_id.clone(), handle);
                 self.queue(
                     "bluetooth",
@@ -2141,6 +2157,11 @@ impl TravelCore {
                 )?;
             }
             BluetoothEvent::Connected { handle, .. } => {
+                tracing::info!(
+                    subsystem = "groupAuth",
+                    ?handle,
+                    "BLE admission channel ready"
+                );
                 self.send_group_presence(handle)?;
                 self.send_invitation_info(handle)?;
             }
@@ -2156,7 +2177,9 @@ impl TravelCore {
             BluetoothEvent::ControlReceived { handle, message } => {
                 self.on_control_received(handle, message)?;
             }
-            BluetoothEvent::Failed { message, .. } => self.diagnostic("bluetooth", message),
+            BluetoothEvent::Failed { message, .. } => {
+                tracing::error!(subsystem = "bluetooth", %message, "Bluetooth backend failed");
+            }
             BluetoothEvent::Started { .. }
             | BluetoothEvent::Stopped { .. }
             | BluetoothEvent::ControlSent { .. } => {}
@@ -2205,13 +2228,28 @@ impl TravelCore {
             || self.last_now_ms > envelope.expires_at_ms
             || envelope.created_at_ms > self.last_now_ms.saturating_add(300_000)
         {
-            self.diagnostic("control", "discarded expired or future BLE group control");
+            tracing::warn!(
+                subsystem = "control",
+                "discarded expired or future BLE group control"
+            );
             return Ok(());
         }
-        let group = self.state.group.clone().ok_or(CoreError::NoActiveGroup)?;
-        let group_key = self
-            .group_key
-            .ok_or(CoreError::GroupCredentialUnavailable)?;
+        let Some(group) = self.state.group.clone() else {
+            tracing::debug!(
+                subsystem = "groupAuth",
+                ?handle,
+                "ignored BLE group control received before admission completed"
+            );
+            return Ok(());
+        };
+        let Some(group_key) = self.group_key else {
+            tracing::debug!(
+                subsystem = "groupAuth",
+                ?handle,
+                "ignored BLE group control while group credential is unavailable"
+            );
+            return Ok(());
+        };
         let associated_data = group_control_associated_data(
             envelope.protocol_version,
             envelope.created_at_ms,
@@ -2479,7 +2517,12 @@ impl TravelCore {
                 )?;
             }
             "dataAvailable" => {
-                self.diagnostic("control", format!("received {kind} from {sender}"));
+                tracing::debug!(
+                    subsystem = "control",
+                    %kind,
+                    %sender,
+                    "received group control"
+                );
                 self.start_transport_if_ready()?;
                 if let Some(connection) = self.transport_connections.get(&sender).copied() {
                     let digest = self
@@ -2499,7 +2542,11 @@ impl TravelCore {
                     }
                 }
             }
-            _ => self.diagnostic("control", format!("ignored unknown control {kind}")),
+            _ => tracing::warn!(
+                subsystem = "control",
+                %kind,
+                "ignored unknown control"
+            ),
         }
         Ok(())
     }
@@ -2547,10 +2594,15 @@ impl TravelCore {
         if self.state.group.is_some() || self.pending_joiner_handshake.is_some() {
             return Ok(());
         }
-        let Some(pin) = self.pending_join_pin.as_deref() else {
+        let Some(pin) = self.pending_join_pin.clone() else {
             return Ok(());
         };
         let invitation: InvitationInfo = serde_json::from_slice(payload)?;
+        tracing::info!(
+            subsystem = "groupAuth",
+            ?handle,
+            "received invitation; starting PIN handshake"
+        );
         let _: [u8; 32] = invitation
             .inviter_public_key
             .as_slice()
@@ -2561,7 +2613,7 @@ impl TravelCore {
             1,
             self.state.identity.peer_id.clone(),
             invitation.inviter_peer_id.clone(),
-            pin,
+            &pin,
         );
         self.pending_joiner_handshake = Some(handshake);
         self.bind_bluetooth_handle(handle, invitation.inviter_peer_id.clone());
@@ -2582,7 +2634,13 @@ impl TravelCore {
                 })?,
             },
             self.last_now_ms.saturating_add(120_000),
-        )
+        )?;
+        tracing::info!(
+            subsystem = "groupAuth",
+            ?handle,
+            "sent authenticated join hello"
+        );
+        Ok(())
     }
 
     fn on_join_hello(&mut self, handle: PeerHandle, payload: &[u8]) -> Result<(), CoreError> {
@@ -2638,8 +2696,11 @@ impl TravelCore {
         member_public_keys.insert(request.hello.peer_id.clone(), request.public_key.clone());
         let credential = AdmissionCredential {
             group: admitted_group,
-            member_public_keys,
-            group_key: group_key.to_vec(),
+            member_public_keys: member_public_keys
+                .into_iter()
+                .map(|(peer, key)| (peer, encode_binary(&key)))
+                .collect(),
+            group_key: encode_binary(&group_key),
         };
         let associated_data = admission_associated_data(
             &request.hello.group_id,
@@ -2653,8 +2714,9 @@ impl TravelCore {
         );
         let response = JoinResponsePayload {
             hello: local_hello,
-            confirmation: session.confirmation(b"inviter").to_vec(),
-            sealed_credential,
+            confirmation: encode_binary(&session.confirmation(b"inviter")),
+            sealed_nonce: encode_binary(&sealed_credential.nonce),
+            sealed_credential: encode_binary(&sealed_credential.ciphertext),
         };
         self.bind_bluetooth_handle(handle, request.hello.peer_id.clone());
         self.pending_inviter_admissions.insert(
@@ -2676,6 +2738,7 @@ impl TravelCore {
     }
 
     fn on_join_response(&mut self, handle: PeerHandle, payload: &[u8]) -> Result<(), CoreError> {
+        tracing::info!(subsystem = "groupAuth", ?handle, "received join response");
         let response: JoinResponsePayload = serde_json::from_slice(payload)?;
         let handshake = self
             .pending_joiner_handshake
@@ -2684,11 +2747,8 @@ impl TravelCore {
         let session = handshake
             .finish(&response.hello)
             .map_err(|error| CoreError::GroupAuth(error.to_string()))?;
-        let confirmation: [u8; 32] = response
-            .confirmation
-            .as_slice()
-            .try_into()
-            .map_err(|_| CoreError::GroupAuth("inviter confirmation is malformed".into()))?;
+        let confirmation =
+            decode_fixed_binary::<32>(&response.confirmation, "inviter confirmation is malformed")?;
         if !session.confirms(b"inviter", &confirmation) {
             return Err(CoreError::GroupAuth(
                 "the PIN transcript did not authenticate the inviter".into(),
@@ -2699,7 +2759,17 @@ impl TravelCore {
             response.hello.epoch,
             &self.state.identity.peer_id,
         );
-        let credential_bytes = open(&session.key, &response.sealed_credential, &associated_data)
+        let sealed_credential = SealedMessage {
+            nonce: decode_fixed_binary::<24>(
+                &response.sealed_nonce,
+                "admission nonce is malformed",
+            )?,
+            ciphertext: decode_binary(
+                &response.sealed_credential,
+                "admission credential is malformed",
+            )?,
+        };
+        let credential_bytes = open(&session.key, &sealed_credential, &associated_data)
             .map_err(|error| CoreError::GroupAuth(error.to_string()))?;
         let credential: AdmissionCredential = serde_json::from_slice(&credential_bytes)?;
         if credential.group.epoch == 0
@@ -2713,14 +2783,18 @@ impl TravelCore {
                 "admission credential does not include this device".into(),
             ));
         }
-        let group_key: [u8; 32] = credential
-            .group_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| CoreError::GroupAuth("group credential key is malformed".into()))?;
+        let group_key =
+            decode_fixed_binary::<32>(&credential.group_key, "group credential key is malformed")?;
         self.state.group = Some(credential.group);
         self.state.processed_control_ids.clear();
-        self.state.member_public_keys = credential.member_public_keys;
+        self.state.member_public_keys = credential
+            .member_public_keys
+            .into_iter()
+            .map(|(peer, key)| {
+                decode_fixed_binary::<32>(&key, "member public key is malformed")
+                    .map(|bytes| (peer, bytes.to_vec()))
+            })
+            .collect::<Result<_, _>>()?;
         self.group_key = Some(group_key);
         self.bind_bluetooth_handle(handle, response.hello.peer_id.clone());
         let members = self
@@ -2741,6 +2815,11 @@ impl TravelCore {
         )?;
         self.rebuild_replication()?;
         self.pending_join_pin = None;
+        tracing::info!(
+            subsystem = "groupAuth",
+            ?handle,
+            "PIN-authenticated admission completed"
+        );
         self.send_control_handle(
             handle,
             BluetoothControlMessage::JoinConfirmation {
@@ -2911,7 +2990,12 @@ impl TravelCore {
                     }
                 }
                 self.transport_decoders.remove(&connection);
-                self.diagnostic("peerTransport", reason);
+                tracing::warn!(
+                    subsystem = "peerTransport",
+                    ?connection,
+                    %reason,
+                    "peer transport disconnected"
+                );
             }
             TransportEvent::DataReceived { connection, bytes } => {
                 let messages = self
@@ -2923,7 +3007,13 @@ impl TravelCore {
                     self.handle_wire_message(connection, message)?;
                 }
             }
-            TransportEvent::Failed { message, .. } => self.diagnostic("peerTransport", message),
+            TransportEvent::Failed { message, .. } => {
+                tracing::error!(
+                    subsystem = "peerTransport",
+                    %message,
+                    "peer transport failed"
+                );
+            }
             TransportEvent::DiscoveryStarted { .. }
             | TransportEvent::DiscoveryStopped { .. }
             | TransportEvent::PeerFound { .. }
@@ -2984,12 +3074,34 @@ impl TravelCore {
             }
             WireMessage::EventBatch { events, .. } => {
                 let mut persisted = Vec::new();
-                for event in events {
-                    let receipt = self
+                for signed in events {
+                    let ingested = match self
                         .replication
                         .as_mut()
                         .ok_or(CoreError::NoActiveGroup)?
-                        .ingest(&event)?;
+                        .ingest(&signed)
+                    {
+                        Ok(ingested) => ingested,
+                        Err(error) => {
+                            let has_registered_key = self
+                                .state
+                                .member_public_keys
+                                .get(&signed.signer_id)
+                                .is_some_and(|key| key.len() == 32);
+                            tracing::error!(
+                                subsystem = "replication",
+                                signer = %signed.signer_id,
+                                event_bytes = signed.event_bytes.len(),
+                                signature_bytes = signed.signature.len(),
+                                registered_key = has_registered_key,
+                                %error,
+                                "rejected replicated event"
+                            );
+                            return Err(CoreError::Replication(error));
+                        }
+                    };
+                    let receipt = ingested.receipt;
+                    let event = ingested.event;
                     persisted.push(event.id.clone());
                     if receipt.inserted {
                         self.materialize_event(&event)?;
@@ -3016,7 +3128,7 @@ impl TravelCore {
                 let replication = self.replication.as_mut().ok_or(CoreError::NoActiveGroup)?;
                 for event_id in event_ids {
                     let target_persisted = replication
-                        .event(&event_id)?
+                        .event_metadata(&event_id)?
                         .is_some_and(|event| event.target_members.contains(&receiver_id));
                     replication.apply_receipt(&IngestReceipt {
                         event_id,
@@ -3351,7 +3463,7 @@ impl TravelCore {
                         stale_sample,
                     )?;
                 }
-                self.diagnostic("location", "location request timed out");
+                tracing::warn!(subsystem = "location", "location request timed out");
             }
             LocationEvent::Failed {
                 request_id,
@@ -3369,7 +3481,7 @@ impl TravelCore {
                         )?;
                     }
                 }
-                self.diagnostic("location", message);
+                tracing::error!(subsystem = "location", %message, "location backend failed");
             }
             LocationEvent::Started { .. }
             | LocationEvent::Stopped { .. }
@@ -3439,7 +3551,9 @@ impl TravelCore {
                     peer.ranging = None;
                 }
             }
-            RangingEvent::Failed { message, .. } => self.diagnostic("ranging", message),
+            RangingEvent::Failed { message, .. } => {
+                tracing::error!(subsystem = "ranging", %message, "ranging backend failed");
+            }
             RangingEvent::Started { .. } => {}
         }
         Ok(())
@@ -3448,9 +3562,19 @@ impl TravelCore {
     fn on_notification(&mut self, event: NotificationEvent) -> Result<(), CoreError> {
         match event {
             NotificationEvent::Opened { identifier, .. } => {
-                self.diagnostic("notifications", format!("opened {identifier}"));
+                tracing::debug!(
+                    subsystem = "notifications",
+                    %identifier,
+                    "notification opened"
+                );
             }
-            NotificationEvent::Failed { message, .. } => self.diagnostic("notifications", message),
+            NotificationEvent::Failed { message, .. } => {
+                tracing::error!(
+                    subsystem = "notifications",
+                    %message,
+                    "notification backend failed"
+                );
+            }
             _ => {}
         }
         Ok(())
@@ -3497,7 +3621,9 @@ impl TravelCore {
                     )?;
                 }
             }
-            CallSystemEvent::Failed { message, .. } => self.diagnostic("callSystem", message),
+            CallSystemEvent::Failed { message, .. } => {
+                tracing::error!(subsystem = "callSystem", %message, "call system failed");
+            }
             _ => {}
         }
         Ok(())
@@ -3575,7 +3701,11 @@ impl TravelCore {
                 }
             }
             SecureStorageEvent::Failed { message, .. } => {
-                self.diagnostic("secureStorage", message);
+                tracing::error!(
+                    subsystem = "secureStorage",
+                    %message,
+                    "secure storage failed"
+                );
             }
             _ => {}
         }
@@ -3985,17 +4115,6 @@ impl TravelCore {
         }
     }
 
-    fn diagnostic(&mut self, category: impl Into<String>, message: impl Into<String>) {
-        self.state.diagnostics.push(DiagnosticEntry {
-            timestamp_ms: self.last_now_ms,
-            category: category.into(),
-            message: message.into(),
-        });
-        if self.state.diagnostics.len() > 200 {
-            self.state.diagnostics.remove(0);
-        }
-    }
-
     fn queue<T: Serialize>(&mut self, module: &str, command: &T) -> Result<(), CoreError> {
         match module {
             "bluetooth" | "peerTransport" | "location" | "ranging" | "notifications"
@@ -4065,6 +4184,25 @@ fn recipients(peer: &PeerId) -> GroupAudience {
 
 fn admission_associated_data(group_id: &GroupId, epoch: u64, joiner: &PeerId) -> Vec<u8> {
     format!("tc/admission/{group_id}/{epoch}/{joiner}").into_bytes()
+}
+
+fn encode_binary(bytes: &[u8]) -> String {
+    STANDARD_NO_PAD.encode(bytes)
+}
+
+fn decode_binary(value: &str, malformed: &str) -> Result<Vec<u8>, CoreError> {
+    STANDARD_NO_PAD
+        .decode(value)
+        .map_err(|_| CoreError::GroupAuth(malformed.into()))
+}
+
+fn decode_fixed_binary<const SIZE: usize>(
+    value: &str,
+    malformed: &str,
+) -> Result<[u8; SIZE], CoreError> {
+    decode_binary(value, malformed)?
+        .try_into()
+        .map_err(|_| CoreError::GroupAuth(malformed.into()))
 }
 
 fn group_control_associated_data(
@@ -4198,7 +4336,7 @@ mod tests {
                 .unwrap();
             first.snapshot().unwrap().identity.peer_id
         };
-        let second = TravelCore::new(config).unwrap();
+        let mut second = TravelCore::new(config).unwrap();
         let snapshot = second.snapshot().unwrap();
         assert_eq!(snapshot.identity.peer_id, peer_id);
         assert_eq!(snapshot.group.unwrap().name, "Trip");
@@ -4207,6 +4345,157 @@ mod tests {
             .blockers()
             .iter()
             .any(|blocker| blocker.code == "identityKeyUnavailable"));
+        assert!(second.drain_module_commands().iter().any(|command| {
+            command.module == "bluetooth"
+                && command
+                    .command
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("start")
+        }));
+    }
+
+    #[test]
+    fn creating_group_immediately_opens_ble_admission() {
+        let mut core = core();
+        core.drain_module_commands();
+
+        core.dispatch(AppCommand::CreateGroup {
+            name: "Trip".into(),
+            now_ms: 1,
+        })
+        .unwrap();
+
+        let commands = core.drain_module_commands();
+        assert!(commands.iter().any(|command| {
+            command.module == "bluetooth"
+                && command
+                    .command
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("start")
+        }));
+    }
+
+    #[test]
+    fn joining_device_ignores_group_control_received_before_admission() {
+        let mut core = core();
+        core.drain_module_commands();
+        core.dispatch(AppCommand::JoinWithPin {
+            pin: "123456".into(),
+            now_ms: 1,
+        })
+        .unwrap();
+        core.drain_module_commands();
+
+        let handle = PeerHandle(1);
+        let snapshot = core
+            .ingest_module_event_at(
+                ModuleEventEnvelope {
+                    module: "bluetooth".into(),
+                    event: serde_json::to_value(BluetoothEvent::Connected {
+                        request_id: RequestId::new(),
+                        handle,
+                        max_packet_bytes: 180,
+                    })
+                    .unwrap(),
+                },
+                2,
+            )
+            .unwrap();
+        assert!(snapshot.group.is_none());
+        assert!(snapshot.lifecycle.last_error.is_none());
+
+        let associated_data = group_control_associated_data(PROTOCOL_VERSION, 2, 60_000);
+        let envelope = GroupControlEnvelope {
+            protocol_version: PROTOCOL_VERSION,
+            created_at_ms: 2,
+            expires_at_ms: 60_000,
+            sealed: seal(
+                &SecretKeyMaterial::random(),
+                b"control encrypted for an already admitted group",
+                &associated_data,
+            ),
+        };
+        let snapshot = core
+            .ingest_module_event_at(
+                ModuleEventEnvelope {
+                    module: "bluetooth".into(),
+                    event: serde_json::to_value(BluetoothEvent::ControlReceived {
+                        handle,
+                        message: BluetoothControlMessage::GroupControl {
+                            payload: serde_json::to_vec(&envelope).unwrap(),
+                        },
+                    })
+                    .unwrap(),
+                },
+                3,
+            )
+            .unwrap();
+
+        assert!(snapshot.group.is_none());
+        assert!(snapshot.lifecycle.last_error.is_none());
+        assert_eq!(core.pending_join_pin.as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn compact_admission_response_fits_ble_control_limit_for_eight_members() {
+        let members = (0_u8..8)
+            .map(|index| MemberSnapshot {
+                peer_id: PeerId::new(),
+                display_name: format!("Member {index}"),
+                role: if index == 0 {
+                    MemberRole::Owner
+                } else {
+                    MemberRole::Member
+                },
+                active: true,
+            })
+            .collect::<Vec<_>>();
+        let member_public_keys = members
+            .iter()
+            .enumerate()
+            .map(|(index, member)| {
+                (
+                    member.peer_id.clone(),
+                    encode_binary(&[u8::try_from(index).unwrap(); 32]),
+                )
+            })
+            .collect();
+        let credential = AdmissionCredential {
+            group: GroupSnapshot {
+                id: GroupId::new(),
+                name: "Eight person trip".into(),
+                epoch: 1,
+                invite_pin: None,
+                members,
+            },
+            member_public_keys,
+            group_key: encode_binary(&[9; 32]),
+        };
+        let sealed = seal(
+            &SecretKeyMaterial::random(),
+            &serde_json::to_vec(&credential).unwrap(),
+            b"test admission",
+        );
+        let response = JoinResponsePayload {
+            hello: JoinHello {
+                group_id: GroupId::new(),
+                epoch: 1,
+                peer_id: PeerId::new(),
+                spake_message: vec![3; 32],
+            },
+            confirmation: encode_binary(&[4; 32]),
+            sealed_nonce: encode_binary(&sealed.nonce),
+            sealed_credential: encode_binary(&sealed.ciphertext),
+        };
+
+        let encoded = serde_json::to_vec(&response).unwrap();
+        assert!(
+            encoded.len() <= protocol::BLUETOOTH_MAX_CONTROL_PAYLOAD_BYTES,
+            "compact admission response is {} bytes",
+            encoded.len()
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 use crypto::{verify_signature, CryptoError, IdentityKeypair};
 use model::{
     DeliveryPolicy, EventEnvelope, EventId, GroupAudience, GroupId, HybridLogicalClock, PeerId,
-    SyncDigest,
+    SignedEvent, SyncDigest,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +24,8 @@ pub enum ReplicationError {
     Signature(#[from] CryptoError),
     #[error("event serialization failed: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("signed event outer signer does not match the authenticated event sender")]
+    SignerMismatch,
     #[error("publication does not exist")]
     UnknownPublication,
 }
@@ -45,6 +47,12 @@ pub struct IngestReceipt {
     /// True only when `holder` is a frozen publication target. A relay receipt
     /// must never be interpreted as delivery.
     pub target_persisted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct IngestedEvent {
+    pub receipt: IngestReceipt,
+    pub event: EventEnvelope,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -149,8 +157,10 @@ impl ReplicationEngine {
         let group_epoch = self.group_epoch;
         let event_type = event_type.into();
         let identity = &self.identity;
-        let event = self.store.publish_local(&sender, |sender_sequence| {
-            let mut event = EventEnvelope {
+        let publication_id = id.clone();
+        let signer_id = sender.clone();
+        self.store.publish_local(&sender, |sender_sequence| {
+            let event = EventEnvelope {
                 id,
                 group_id,
                 group_epoch,
@@ -163,40 +173,55 @@ impl ReplicationEngine {
                 delivery_policy: policy,
                 created_at_ms: now_ms,
                 payload,
-                signature: Vec::new(),
             };
-            let bytes = event.signing_bytes()?;
-            event.signature = identity.sign(&bytes);
-            Ok(event)
+            let event_bytes = serde_json::to_vec(&event)?;
+            let signed = SignedEvent {
+                signer_id,
+                signature: identity.sign(&event_bytes),
+                event_bytes,
+            };
+            Ok((event, signed))
         })?;
+        let sender_sequence = self
+            .store
+            .get(&publication_id)?
+            .ok_or(ReplicationError::UnknownPublication)?
+            .sender_sequence;
         Ok(Publication {
-            event_id: event.id,
-            sender_sequence: event.sender_sequence,
+            event_id: publication_id,
+            sender_sequence,
             persisted_locally: true,
         })
     }
 
-    pub fn ingest(&mut self, event: &EventEnvelope) -> Result<IngestReceipt, ReplicationError> {
+    pub fn ingest(&mut self, signed: &SignedEvent) -> Result<IngestedEvent, ReplicationError> {
+        let public_key = self
+            .verifying_keys
+            .get(&signed.signer_id)
+            .ok_or(ReplicationError::UnknownSender)?;
+        verify_signature(public_key, &signed.event_bytes, &signed.signature)?;
+        let event = signed.decode_event()?;
+        if event.sender_id != signed.signer_id {
+            return Err(ReplicationError::SignerMismatch);
+        }
         if event.group_id != self.group_id || event.group_epoch != self.group_epoch {
             return Err(ReplicationError::WrongGroupEpoch);
         }
-        let public_key = self
-            .verifying_keys
-            .get(&event.sender_id)
-            .ok_or(ReplicationError::UnknownSender)?;
-        verify_signature(public_key, &event.signing_bytes()?, &event.signature)?;
         self.clock
             .observe(&event.logical_clock, event.created_at_ms);
-        let inserted = self.store.insert_remote(event)? == InsertOutcome::Inserted;
+        let inserted = self.store.insert_remote(&event, signed)? == InsertOutcome::Inserted;
         let target_persisted = event.target_members.contains(&self.local_peer);
         if target_persisted {
             self.store.record_ack(&event.id, &self.local_peer)?;
         }
-        Ok(IngestReceipt {
-            event_id: event.id.clone(),
-            holder: self.local_peer.clone(),
-            inserted,
-            target_persisted,
+        Ok(IngestedEvent {
+            receipt: IngestReceipt {
+                event_id: event.id.clone(),
+                holder: self.local_peer.clone(),
+                inserted,
+                target_persisted,
+            },
+            event,
         })
     }
 
@@ -221,7 +246,7 @@ impl ReplicationEngine {
     pub fn events_missing_from(
         &self,
         remote: &SyncDigest,
-    ) -> Result<Vec<EventEnvelope>, ReplicationError> {
+    ) -> Result<Vec<SignedEvent>, ReplicationError> {
         if remote.group_epoch != self.group_epoch {
             return Err(ReplicationError::WrongGroupEpoch);
         }
@@ -232,11 +257,18 @@ impl ReplicationEngine {
         Ok(self.store.all_acks()?)
     }
 
-    pub fn all_events(&self) -> Result<Vec<EventEnvelope>, ReplicationError> {
-        Ok(self.store.all_events()?)
+    pub fn all_events(&self) -> Result<Vec<SignedEvent>, ReplicationError> {
+        Ok(self.store.all_signed_events()?)
     }
 
-    pub fn event(&self, event_id: &EventId) -> Result<Option<EventEnvelope>, ReplicationError> {
+    pub fn event(&self, event_id: &EventId) -> Result<Option<SignedEvent>, ReplicationError> {
+        Ok(self.store.get_signed(event_id)?)
+    }
+
+    pub fn event_metadata(
+        &self,
+        event_id: &EventId,
+    ) -> Result<Option<EventEnvelope>, ReplicationError> {
         Ok(self.store.get(event_id)?)
     }
 
@@ -313,12 +345,12 @@ pub fn anti_entropy_pair(
     let right_to_left = right.events_missing_from(&left_digest)?;
 
     for event in left_to_right {
-        let receipt = right.ingest(&event)?;
-        left.apply_receipt(&receipt)?;
+        let ingested = right.ingest(&event)?;
+        left.apply_receipt(&ingested.receipt)?;
     }
     for event in right_to_left {
-        let receipt = left.ingest(&event)?;
-        right.apply_receipt(&receipt)?;
+        let ingested = left.ingest(&event)?;
+        right.apply_receipt(&ingested.receipt)?;
     }
 
     // Persisted target acknowledgements are themselves store-and-forward facts.
@@ -454,6 +486,59 @@ mod tests {
         b.ingest(&events[2]).unwrap();
         let missing = a.events_missing_from(&b.digest().unwrap()).unwrap();
         assert_eq!(missing.len(), 1);
-        assert_eq!(missing[0].sender_sequence, 2);
+        assert_eq!(missing[0].decode_event().unwrap().sender_sequence, 2);
+    }
+
+    #[test]
+    fn verifies_the_received_bytes_before_parsing_float_payloads() {
+        let signer = IdentityKeypair::generate();
+        let verifier = IdentityKeypair::generate();
+        let members = [PeerId::from("a"), PeerId::from("b")].into_iter().collect();
+        let mut b = ReplicationEngine::in_memory(
+            PeerId::from("b"),
+            GroupId::from("trip"),
+            1,
+            members,
+            verifier,
+        )
+        .unwrap();
+        b.register_peer_key(PeerId::from("a"), signer.public_key_bytes());
+        let event_bytes = br#"{"id":"evt_float","groupId":"trip","groupEpoch":1,"senderId":"a","senderSequence":1,"logicalClock":{"physicalMs":1,"logical":0,"node":"a"},"audience":{"kind":"group"},"targetMembers":["b"],"eventType":"location.sample","deliveryPolicy":{"kind":"durable"},"createdAtMs":1,"payload":{"longitude":113.89049500316887}}"#.to_vec();
+        let signed = SignedEvent {
+            signer_id: PeerId::from("a"),
+            signature: signer.sign(&event_bytes),
+            event_bytes,
+        };
+        assert_ne!(
+            serde_json::to_vec(&signed.decode_event().unwrap()).unwrap(),
+            signed.event_bytes,
+            "the regression fixture must change lexical float form after parsing"
+        );
+
+        let ingested = b.ingest(&signed).unwrap();
+
+        assert_eq!(ingested.event.id, EventId::from("evt_float"));
+        assert!(ingested.receipt.inserted);
+    }
+
+    #[test]
+    fn rejects_tampered_bytes_before_attempting_json_parsing() {
+        let (mut a, mut b, _) = engines();
+        let publication = a
+            .publish(
+                "test",
+                json!({"value": 1}),
+                GroupAudience::Group,
+                DeliveryPolicy::Durable,
+                1,
+            )
+            .unwrap();
+        let mut signed = a.event(&publication.event_id).unwrap().unwrap();
+        signed.event_bytes = b"not JSON".to_vec();
+
+        assert!(matches!(
+            b.ingest(&signed),
+            Err(ReplicationError::Signature(_))
+        ));
     }
 }

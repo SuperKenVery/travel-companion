@@ -1,7 +1,7 @@
 //! SQLite-backed immutable event log. SQLite access remains behind this crate;
 //! feature crates never synchronize mutable rows directly.
 
-use model::{EventEnvelope, EventId, PeerId, SequenceSummary, SyncDigest};
+use model::{EventEnvelope, EventId, PeerId, SequenceSummary, SignedEvent, SyncDigest};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,6 +17,8 @@ pub enum StoreError {
     ImmutableConflict,
     #[error("local event builder returned sender/sequence inconsistent with transaction")]
     InvalidLocalSequence,
+    #[error("signed event metadata does not match its authenticated event bytes")]
+    InvalidSignedEvent,
     #[error("integer value does not fit SQLite representation")]
     IntegerRange,
 }
@@ -55,6 +57,18 @@ impl EventStore {
     }
 
     fn from_connection(connection: Connection) -> Result<Self, StoreError> {
+        let schema_version =
+            connection.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        if schema_version != 2 {
+            connection.execute_batch(
+                "DROP TABLE IF EXISTS event_targets;
+                 DROP TABLE IF EXISTS persisted_acks;
+                 DROP TABLE IF EXISTS replica_holders;
+                 DROP TABLE IF EXISTS materialized_events;
+                 DROP TABLE IF EXISTS events;
+                 DROP TABLE IF EXISTS sender_sequences;",
+            )?;
+        }
         connection.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS sender_sequences (
@@ -69,7 +83,7 @@ impl EventStore {
                sender_sequence INTEGER NOT NULL,
                logical_physical_ms INTEGER NOT NULL,
                logical_counter INTEGER NOT NULL,
-               event_json BLOB NOT NULL,
+               signed_event_json BLOB NOT NULL,
                UNIQUE(sender_id, sender_sequence)
              );
              CREATE INDEX IF NOT EXISTS events_group_sender_sequence
@@ -97,7 +111,8 @@ impl EventStore {
              CREATE TABLE IF NOT EXISTS app_state (
                state_key TEXT PRIMARY KEY NOT NULL,
                state_json BLOB NOT NULL
-             );",
+             );
+             PRAGMA user_version = 2;",
         )?;
         Ok(Self { connection })
     }
@@ -108,9 +123,9 @@ impl EventStore {
         &mut self,
         sender: &PeerId,
         builder: F,
-    ) -> Result<EventEnvelope, StoreError>
+    ) -> Result<SignedEvent, StoreError>
     where
-        F: FnOnce(u64) -> Result<EventEnvelope, StoreError>,
+        F: FnOnce(u64) -> Result<(EventEnvelope, SignedEvent), StoreError>,
     {
         let transaction = self.connection.transaction()?;
         let sequence = transaction
@@ -122,11 +137,11 @@ impl EventStore {
             .optional()?
             .unwrap_or(1);
         let sequence = u64::try_from(sequence).map_err(|_| StoreError::IntegerRange)?;
-        let event = builder(sequence)?;
+        let (event, signed) = builder(sequence)?;
         if &event.sender_id != sender || event.sender_sequence != sequence {
             return Err(StoreError::InvalidLocalSequence);
         }
-        insert_event_transaction(&transaction, &event)?;
+        insert_event_transaction(&transaction, &event, &signed)?;
         let next = sequence.checked_add(1).ok_or(StoreError::IntegerRange)?;
         transaction.execute(
             "INSERT INTO sender_sequences(sender_id, next_sequence) VALUES(?1, ?2)
@@ -134,20 +149,30 @@ impl EventStore {
             params![sender.as_str(), to_i64(next)?],
         )?;
         transaction.commit()?;
-        Ok(event)
+        Ok(signed)
     }
 
-    pub fn insert_remote(&mut self, event: &EventEnvelope) -> Result<InsertOutcome, StoreError> {
+    pub fn insert_remote(
+        &mut self,
+        event: &EventEnvelope,
+        signed: &SignedEvent,
+    ) -> Result<InsertOutcome, StoreError> {
         let transaction = self.connection.transaction()?;
-        let outcome = insert_event_transaction(&transaction, event)?;
+        let outcome = insert_event_transaction(&transaction, event, signed)?;
         transaction.commit()?;
         Ok(outcome)
     }
 
     pub fn get(&self, event_id: &EventId) -> Result<Option<EventEnvelope>, StoreError> {
+        self.get_signed(event_id)?
+            .map(|signed| signed.decode_event().map_err(StoreError::from))
+            .transpose()
+    }
+
+    pub fn get_signed(&self, event_id: &EventId) -> Result<Option<SignedEvent>, StoreError> {
         self.connection
             .query_row(
-                "SELECT event_json FROM events WHERE event_id = ?1",
+                "SELECT signed_event_json FROM events WHERE event_id = ?1",
                 params![event_id.as_str()],
                 |row| row.get::<_, Vec<u8>>(0),
             )
@@ -157,8 +182,15 @@ impl EventStore {
     }
 
     pub fn all_events(&self) -> Result<Vec<EventEnvelope>, StoreError> {
+        self.all_signed_events()?
+            .into_iter()
+            .map(|signed| signed.decode_event().map_err(StoreError::from))
+            .collect()
+    }
+
+    pub fn all_signed_events(&self) -> Result<Vec<SignedEvent>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT event_json FROM events
+            "SELECT signed_event_json FROM events
              ORDER BY logical_physical_ms, logical_counter, sender_id, sender_sequence",
         )?;
         let rows = statement.query_map([], |row| row.get::<_, Vec<u8>>(0))?;
@@ -233,21 +265,28 @@ impl EventStore {
         })
     }
 
-    pub fn events_missing_from(
-        &self,
-        remote: &SyncDigest,
-    ) -> Result<Vec<EventEnvelope>, StoreError> {
-        let events = self.all_events()?;
-        Ok(events
+    pub fn events_missing_from(&self, remote: &SyncDigest) -> Result<Vec<SignedEvent>, StoreError> {
+        let events = self.all_signed_events()?;
+        events
             .into_iter()
-            .filter(|event| {
-                event.group_epoch == remote.group_epoch
-                    && !remote
-                        .senders
-                        .get(&event.sender_id)
-                        .is_some_and(|summary| summary.contains(event.sender_sequence))
+            .map(|signed| {
+                let event = signed.decode_event()?;
+                Ok((event, signed))
             })
-            .collect())
+            .filter_map(|result: Result<_, StoreError>| match result {
+                Ok((event, signed))
+                    if event.group_epoch == remote.group_epoch
+                        && !remote
+                            .senders
+                            .get(&event.sender_id)
+                            .is_some_and(|summary| summary.contains(event.sender_sequence)) =>
+                {
+                    Some(Ok(signed))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
 
     pub fn mark_materialized(
@@ -336,11 +375,22 @@ impl EventStore {
 fn insert_event_transaction(
     transaction: &Transaction<'_>,
     event: &EventEnvelope,
+    signed: &SignedEvent,
 ) -> Result<InsertOutcome, StoreError> {
-    let bytes = serde_json::to_vec(event)?;
+    let decoded = signed.decode_event()?;
+    if signed.signer_id != event.sender_id
+        || decoded.id != event.id
+        || decoded.group_id != event.group_id
+        || decoded.group_epoch != event.group_epoch
+        || decoded.sender_id != event.sender_id
+        || decoded.sender_sequence != event.sender_sequence
+    {
+        return Err(StoreError::InvalidSignedEvent);
+    }
+    let bytes = serde_json::to_vec(signed)?;
     let by_id = transaction
         .query_row(
-            "SELECT event_json FROM events WHERE event_id = ?1",
+            "SELECT signed_event_json FROM events WHERE event_id = ?1",
             params![event.id.as_str()],
             |row| row.get::<_, Vec<u8>>(0),
         )
@@ -366,7 +416,7 @@ fn insert_event_transaction(
     transaction.execute(
         "INSERT INTO events(
            event_id, group_id, group_epoch, sender_id, sender_sequence,
-           logical_physical_ms, logical_counter, event_json
+           logical_physical_ms, logical_counter, signed_event_json
          ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             event.id.as_str(),
@@ -426,8 +476,8 @@ mod tests {
     use super::*;
     use model::{DeliveryPolicy, EventId, GroupAudience, GroupId, HlcTimestamp};
 
-    fn event(sender: &str, sequence: u64, id: &str) -> EventEnvelope {
-        EventEnvelope {
+    fn event(sender: &str, sequence: u64, id: &str) -> (EventEnvelope, SignedEvent) {
+        let event = EventEnvelope {
             id: EventId::from(id),
             group_id: GroupId::from("g"),
             group_epoch: 1,
@@ -444,8 +494,13 @@ mod tests {
             delivery_policy: DeliveryPolicy::Durable,
             created_at_ms: 0,
             payload: serde_json::json!({"sequence": sequence}),
+        };
+        let signed = SignedEvent {
+            signer_id: event.sender_id.clone(),
+            event_bytes: serde_json::to_vec(&event).unwrap(),
             signature: vec![1],
-        }
+        };
+        (event, signed)
     }
 
     #[test]
@@ -453,16 +508,17 @@ mod tests {
         let mut store = EventStore::in_memory().unwrap();
         let first = event("a", 1, "one");
         assert_eq!(
-            store.insert_remote(&first).unwrap(),
+            store.insert_remote(&first.0, &first.1).unwrap(),
             InsertOutcome::Inserted
         );
         assert_eq!(
-            store.insert_remote(&first).unwrap(),
+            store.insert_remote(&first.0, &first.1).unwrap(),
             InsertOutcome::Duplicate
         );
         assert_eq!(store.event_count().unwrap(), 1);
+        let fork = event("a", 1, "fork");
         assert!(matches!(
-            store.insert_remote(&event("a", 1, "fork")),
+            store.insert_remote(&fork.0, &fork.1),
             Err(StoreError::ImmutableConflict)
         ));
     }
@@ -470,9 +526,13 @@ mod tests {
     #[test]
     fn digest_keeps_exact_sparse_gaps() {
         let mut store = EventStore::in_memory().unwrap();
-        store.insert_remote(&event("a", 1, "one")).unwrap();
-        store.insert_remote(&event("a", 3, "three")).unwrap();
-        store.insert_remote(&event("a", 5, "five")).unwrap();
+        for candidate in [
+            event("a", 1, "one"),
+            event("a", 3, "three"),
+            event("a", 5, "five"),
+        ] {
+            store.insert_remote(&candidate.0, &candidate.1).unwrap();
+        }
         let summary = &store.digest(1).unwrap().senders[&PeerId::from("a")];
         assert_eq!(summary.contiguous_frontier, 1);
         assert_eq!(summary.max_seen, 5);
@@ -489,7 +549,13 @@ mod tests {
         let second = store
             .publish_local(&sender, |sequence| Ok(event("a", sequence, "two")))
             .unwrap();
-        assert_eq!((first.sender_sequence, second.sender_sequence), (1, 2));
+        assert_eq!(
+            (
+                first.decode_event().unwrap().sender_sequence,
+                second.decode_event().unwrap().sender_sequence,
+            ),
+            (1, 2)
+        );
     }
 
     #[test]
@@ -499,13 +565,14 @@ mod tests {
         let published = store
             .publish_local(&sender, |sequence| Ok(event("a", sequence, "one")))
             .unwrap();
+        let published_event = published.decode_event().unwrap();
         store
-            .record_ack(&published.id, &PeerId::from("target"))
+            .record_ack(&published_event.id, &PeerId::from("target"))
             .unwrap();
         store
-            .record_replica(&published.id, &PeerId::from("relay"))
+            .record_replica(&published_event.id, &PeerId::from("relay"))
             .unwrap();
-        store.mark_materialized("im", &published.id).unwrap();
+        store.mark_materialized("im", &published_event.id).unwrap();
 
         store.clear_synchronized_data().unwrap();
 
@@ -514,6 +581,6 @@ mod tests {
         let republished = store
             .publish_local(&sender, |sequence| Ok(event("a", sequence, "two")))
             .unwrap();
-        assert_eq!(republished.sender_sequence, 1);
+        assert_eq!(republished.decode_event().unwrap().sender_sequence, 1);
     }
 }

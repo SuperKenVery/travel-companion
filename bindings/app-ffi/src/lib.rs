@@ -171,7 +171,6 @@ struct InternalSnapshot {
     active_call: Option<Value>,
     #[serde(default)]
     pending_precision: Vec<InternalPrecisionRequest>,
-    diagnostics: InternalDiagnostics,
 }
 
 #[derive(Debug, Deserialize)]
@@ -182,6 +181,7 @@ struct InternalLifecycle {
     is_foreground: bool,
     #[serde(default)]
     blockers: Vec<InternalBlocker>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -350,24 +350,6 @@ struct InternalPrecisionRequest {
     status: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InternalDiagnostics {
-    #[serde(default)]
-    entries: Vec<InternalDiagnosticEntry>,
-    last_error: Option<String>,
-    #[serde(default)]
-    pending_module_commands: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct InternalDiagnosticEntry {
-    timestamp_ms: i64,
-    category: String,
-    message: String,
-}
-
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GuiSnapshot {
@@ -382,7 +364,6 @@ struct GuiSnapshot {
     document: GuiDocument,
     active_call: Option<GuiCall>,
     pending_precision_requests: Vec<GuiPrecisionRequest>,
-    diagnostics: GuiDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -598,30 +579,6 @@ struct GuiPrecisionRequest {
     created_at: i64,
     expires_at: i64,
     state: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GuiDiagnostics {
-    ble_state: String,
-    transport_state: String,
-    location_state: String,
-    ranging_state: String,
-    event_count: u64,
-    pending_replication_count: u64,
-    connected_peer_count: usize,
-    last_sync_at: Option<i64>,
-    recent_events: Vec<GuiDiagnosticEvent>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GuiDiagnosticEvent {
-    id: String,
-    timestamp: i64,
-    subsystem: String,
-    level: String,
-    message: String,
 }
 
 fn adapt_command(
@@ -1106,53 +1063,6 @@ fn adapt_snapshot(
         })
         .collect();
 
-    let recent_events = snapshot
-        .diagnostics
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| GuiDiagnosticEvent {
-            id: format!("diag-{}-{index}", entry.timestamp_ms),
-            timestamp: entry.timestamp_ms,
-            subsystem: entry.category.clone(),
-            level: diagnostic_level(&entry.message).into(),
-            message: entry.message.clone(),
-        })
-        .collect::<Vec<_>>();
-    let module_state = if snapshot.lifecycle.is_traveling {
-        "active"
-    } else {
-        "idle"
-    };
-    let diagnostics = GuiDiagnostics {
-        ble_state: module_state.into(),
-        transport_state: module_state.into(),
-        location_state: if snapshot.lifecycle.sharing_paused {
-            "paused".into()
-        } else {
-            module_state.into()
-        },
-        ranging_state: if snapshot.peers.iter().any(|peer| peer.ranging.is_some()) {
-            "active".into()
-        } else {
-            "idle".into()
-        },
-        event_count: u64::try_from(snapshot.diagnostics.entries.len()).unwrap_or(u64::MAX),
-        pending_replication_count: u64::try_from(snapshot.diagnostics.pending_module_commands)
-            .unwrap_or(u64::MAX),
-        connected_peer_count: snapshot
-            .peers
-            .iter()
-            .filter(|peer| peer.connected && peer.peer_id != snapshot.identity.peer_id)
-            .count(),
-        last_sync_at: snapshot
-            .diagnostics
-            .entries
-            .last()
-            .map(|entry| entry.timestamp_ms),
-        recent_events,
-    };
-
     let phase = if !snapshot.lifecycle.blockers.is_empty() {
         "blocked"
     } else if snapshot.lifecycle.is_traveling {
@@ -1182,7 +1092,7 @@ fn adapt_snapshot(
             location_sharing_enabled: !snapshot.lifecycle.sharing_paused,
             phase: phase.into(),
             blockers,
-            last_error: snapshot.diagnostics.last_error,
+            last_error: snapshot.lifecycle.last_error,
         },
         identity: GuiIdentity {
             peer_id: snapshot.identity.peer_id,
@@ -1195,7 +1105,6 @@ fn adapt_snapshot(
         document,
         active_call,
         pending_precision_requests,
-        diagnostics,
     })
 }
 
@@ -1531,17 +1440,6 @@ fn fresh_uwb_value(value: Option<f64>, observed_at_ms: i64, now_ms: i64) -> Opti
 
 fn fresh_uwb_distance(value: Option<f64>, observed_at_ms: i64, now_ms: i64) -> Option<f64> {
     fresh_uwb_value(value, observed_at_ms, now_ms).filter(|value| *value >= 0.0)
-}
-
-fn diagnostic_level(message: &str) -> &'static str {
-    let normalized = message.to_ascii_lowercase();
-    if normalized.contains("failed") || normalized.contains("error") {
-        "error"
-    } else if normalized.contains("timeout") || normalized.contains("warning") {
-        "warning"
-    } else {
-        "info"
-    }
 }
 
 fn peer_name(names: &BTreeMap<String, String>, peer_id: &str) -> String {

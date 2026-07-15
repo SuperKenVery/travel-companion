@@ -10,10 +10,14 @@ pub use ffi::{BluetoothBackend, BluetoothBackendError, BluetoothEventSink};
 pub use protocol::BluetoothControlMessage;
 
 use model::{PeerId, RequestId};
-use protocol::{BluetoothControlAction, BluetoothControlCodec, BLUETOOTH_DEFAULT_PACKET_BYTES};
+use protocol::{
+    BluetoothControlAction, BluetoothControlCodec, BLUETOOTH_DEFAULT_PACKET_BYTES,
+    BLUETOOTH_MAX_CONTROL_PAYLOAD_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
+use tracing::{debug, debug_span, error, warn, Span};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -94,6 +98,7 @@ pub enum BluetoothEvent {
     Connected {
         request_id: RequestId,
         handle: PeerHandle,
+        max_packet_bytes: u32,
     },
     Disconnected {
         handle: PeerHandle,
@@ -156,6 +161,7 @@ pub enum BluetoothBackendEvent {
     Connected {
         request_id: RequestId,
         handle: PeerHandle,
+        max_packet_bytes: u32,
     },
     Disconnected {
         handle: PeerHandle,
@@ -307,9 +313,20 @@ type BluetoothHandler = Arc<dyn Fn(BluetoothEvent) + Send + Sync + 'static>;
 struct BluetoothRuntimeState {
     codec: BluetoothControlCodec,
     handler: Option<BluetoothHandler>,
-    /// Maps native packet request IDs back to their logical control request.
-    /// `None` represents an internally generated ACK packet.
-    packet_requests: HashMap<RequestId, Option<RequestId>>,
+    /// Per-link packet limit reported after Core Bluetooth negotiates ATT MTU.
+    packet_bytes_by_handle: HashMap<PeerHandle, usize>,
+    /// Keeps the logical control span alive until a remote ACK or terminal
+    /// backend failure arrives.
+    control_spans: HashMap<RequestId, Span>,
+    /// Maps native packet request IDs back to both their logical control
+    /// request and tracing context. `None` represents an internally generated
+    /// ACK packet.
+    packet_requests: HashMap<RequestId, PendingPacketRequest>,
+}
+
+struct PendingPacketRequest {
+    logical_request: Option<RequestId>,
+    span: Span,
 }
 
 /// Rust-side module runtime between domain commands and the raw native BLE
@@ -365,8 +382,28 @@ impl BluetoothRuntime {
                 message,
                 expires_at_ms,
             } => {
-                let maximum_packet_bytes = self.maximum_packet_bytes()?;
-                let packets = self
+                let kind = control_kind(&message);
+                let payload_bytes = message.payload().len();
+                let control_span = debug_span!(
+                    "bluetooth.control",
+                    subsystem = "bluetooth",
+                    direction = "outbound",
+                    request_id = %request_id,
+                    handle = handle.0,
+                    kind,
+                    payload_bytes,
+                    payload_limit_bytes = BLUETOOTH_MAX_CONTROL_PAYLOAD_BYTES,
+                );
+                let _entered = control_span.enter();
+                let maximum_packet_bytes = match self.maximum_packet_bytes(handle) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        error!(%error, "failed to determine BLE packet limit");
+                        return Err(error);
+                    }
+                };
+                debug!(maximum_packet_bytes, "encoding BLE control message");
+                let packets = match self
                     .state
                     .lock()
                     .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
@@ -377,12 +414,28 @@ impl BluetoothRuntime {
                         now_ms,
                         expires_at_ms,
                         maximum_packet_bytes,
-                    )
-                    .map_err(protocol_error)?;
+                    ) {
+                    Ok(packets) => packets,
+                    Err(error) => {
+                        error!(%error, "failed to encode BLE control message");
+                        return Err(protocol_error(error));
+                    }
+                };
+                debug!(
+                    packet_count = packets.len(),
+                    maximum_packet_bytes, "encoded BLE control message"
+                );
+                self.state
+                    .lock()
+                    .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
+                    .control_spans
+                    .insert(request_id.clone(), control_span.clone());
                 if let Err(error) = self.send_packets(handle, packets, Some(request_id.clone())) {
                     if let Ok(mut state) = self.state.lock() {
                         state.codec.cancel(&request_id);
+                        state.control_spans.remove(&request_id);
                     }
+                    error!(%error, "failed to dispatch BLE control packets");
                     return Err(error);
                 }
                 Ok(())
@@ -393,19 +446,31 @@ impl BluetoothRuntime {
     pub fn shutdown(&self) -> Result<(), BluetoothBackendError> {
         if let Ok(mut state) = self.state.lock() {
             state.handler = None;
+            state.control_spans.clear();
             state.packet_requests.clear();
+            state.packet_bytes_by_handle.clear();
         }
         self.backend.shutdown()
     }
 
-    fn maximum_packet_bytes(&self) -> Result<usize, BluetoothBackendError> {
+    fn maximum_packet_bytes(&self, handle: PeerHandle) -> Result<usize, BluetoothBackendError> {
         let advertised = self.backend.capabilities()?.max_packet_bytes as usize;
         if advertised == 0 {
             return Err(backend_error(
                 "Bluetooth backend advertised a zero packet size",
             ));
         }
-        Ok(advertised.min(BLUETOOTH_DEFAULT_PACKET_BYTES))
+        let negotiated = self
+            .state
+            .lock()
+            .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
+            .packet_bytes_by_handle
+            .get(&handle)
+            .copied()
+            .unwrap_or(advertised);
+        Ok(negotiated
+            .min(advertised)
+            .min(BLUETOOTH_DEFAULT_PACKET_BYTES))
     }
 
     fn send_packets(
@@ -414,20 +479,64 @@ impl BluetoothRuntime {
         packets: Vec<Vec<u8>>,
         logical_request: Option<RequestId>,
     ) -> Result<(), BluetoothBackendError> {
-        for packet in packets {
+        let packet_count = packets.len();
+        for (packet_index, packet) in packets.into_iter().enumerate() {
             let packet_request = RequestId::new();
+            let packet_bytes = packet.len();
+            let parent_span = logical_request.as_ref().and_then(|request_id| {
+                self.state
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.control_spans.get(request_id).cloned())
+            });
+            let packet_span = if let Some(parent_span) = parent_span {
+                debug_span!(
+                    parent: &parent_span,
+                    "bluetooth.packet",
+                    subsystem = "bluetooth",
+                    direction = "outbound",
+                    request_id = %packet_request,
+                    packet_index,
+                    packet_count,
+                    packet_bytes,
+                )
+            } else {
+                debug_span!(
+                    "bluetooth.packet",
+                    subsystem = "bluetooth",
+                    direction = "outbound",
+                    request_id = %packet_request,
+                    packet_index,
+                    packet_count,
+                    packet_bytes,
+                )
+            };
             self.state
                 .lock()
                 .map_err(|_| backend_error("Bluetooth runtime state is poisoned"))?
                 .packet_requests
-                .insert(packet_request.clone(), logical_request.clone());
-            if let Err(error) =
+                .insert(
+                    packet_request.clone(),
+                    PendingPacketRequest {
+                        logical_request: logical_request.clone(),
+                        span: packet_span.clone(),
+                    },
+                );
+            let result = packet_span.in_scope(|| {
+                debug!(
+                    handle = handle.0,
+                    "dispatching BLE packet to native backend"
+                );
                 self.backend
                     .send_packet(packet_request.to_string(), handle.0, packet)
-            {
+            });
+            if let Err(error) = result {
                 if let Ok(mut state) = self.state.lock() {
                     state.packet_requests.remove(&packet_request);
                 }
+                packet_span.in_scope(|| {
+                    error!(%error, "native BLE backend rejected packet");
+                });
                 return Err(error);
             }
         }
@@ -445,12 +554,26 @@ impl BluetoothRuntime {
             BluetoothBackendEvent::PeerDiscovered { peer_id, handle } => {
                 self.emit(BluetoothEvent::PeerDiscovered { peer_id, handle });
             }
-            BluetoothBackendEvent::Connected { request_id, handle } => {
-                self.emit(BluetoothEvent::Connected { request_id, handle });
+            BluetoothBackendEvent::Connected {
+                request_id,
+                handle,
+                max_packet_bytes,
+            } => {
+                if let Ok(mut state) = self.state.lock() {
+                    state
+                        .packet_bytes_by_handle
+                        .insert(handle, max_packet_bytes as usize);
+                }
+                self.emit(BluetoothEvent::Connected {
+                    request_id,
+                    handle,
+                    max_packet_bytes,
+                });
             }
             BluetoothBackendEvent::Disconnected { handle, reason } => {
                 if let Ok(mut state) = self.state.lock() {
                     state.codec.remove_peer(handle.0);
+                    state.packet_bytes_by_handle.remove(&handle);
                 }
                 self.emit(BluetoothEvent::Disconnected { handle, reason });
             }
@@ -458,8 +581,17 @@ impl BluetoothRuntime {
                 self.handle_packet(handle, packet);
             }
             BluetoothBackendEvent::PacketSent { request_id } => {
-                if let Ok(mut state) = self.state.lock() {
-                    state.packet_requests.remove(&request_id);
+                let pending = self
+                    .state
+                    .lock()
+                    .ok()
+                    .and_then(|mut state| state.packet_requests.remove(&request_id));
+                if let Some(pending) = pending {
+                    pending.span.in_scope(|| {
+                        debug!("native BLE backend accepted packet");
+                    });
+                } else {
+                    warn!(%request_id, "received completion for unknown BLE packet request");
                 }
             }
             BluetoothBackendEvent::Failed {
@@ -468,17 +600,51 @@ impl BluetoothRuntime {
                 message,
                 retryable,
             } => {
+                let mut packet_span = None;
+                let mut control_span = None;
                 let request_id = request_id.and_then(|request_id| {
-                    let mapped = self
-                        .state
-                        .lock()
-                        .ok()
-                        .and_then(|mut state| state.packet_requests.remove(&request_id));
+                    let mapped = self.state.lock().ok().and_then(|mut state| {
+                        state.packet_requests.remove(&request_id).map(|pending| {
+                            packet_span = Some(pending.span);
+                            if let Some(logical_request) = pending.logical_request.as_ref() {
+                                control_span = state.control_spans.remove(logical_request);
+                            }
+                            pending.logical_request
+                        })
+                    });
                     match mapped {
                         Some(logical) => logical,
                         None => Some(request_id),
                     }
                 });
+                if let Some(span) = packet_span {
+                    span.in_scope(|| {
+                        error!(
+                            %code,
+                            %message,
+                            retryable,
+                            "native BLE backend reported packet failure"
+                        );
+                    });
+                }
+                if let Some(span) = control_span {
+                    span.in_scope(|| {
+                        error!(
+                            %code,
+                            %message,
+                            retryable,
+                            "BLE control failed in native backend"
+                        );
+                    });
+                } else {
+                    error!(
+                        request_id = ?request_id,
+                        %code,
+                        %message,
+                        retryable,
+                        "Bluetooth backend reported failure"
+                    );
+                }
                 self.emit(BluetoothEvent::Failed {
                     request_id,
                     code,
@@ -490,7 +656,7 @@ impl BluetoothRuntime {
     }
 
     fn handle_packet(&self, handle: PeerHandle, packet: Vec<u8>) {
-        let maximum_packet_bytes = match self.maximum_packet_bytes() {
+        let maximum_packet_bytes = match self.maximum_packet_bytes(handle) {
             Ok(value) => value,
             Err(error) => {
                 self.emit_failure(None, "capabilityError", error.to_string(), false);
@@ -510,7 +676,18 @@ impl BluetoothRuntime {
             }) {
             Ok(actions) => actions,
             Err(error) => {
-                self.emit_failure(None, "transportError", error.to_string(), true);
+                let prefix = packet
+                    .iter()
+                    .take(3)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("");
+                self.emit_failure(
+                    None,
+                    "transportError",
+                    format!("{error}; packetBytes={}, prefix={prefix}", packet.len()),
+                    true,
+                );
                 return;
             }
         };
@@ -534,6 +711,18 @@ impl BluetoothRuntime {
                     }
                 }
                 BluetoothControlAction::ControlAcknowledged { request_id } => {
+                    let span = self
+                        .state
+                        .lock()
+                        .ok()
+                        .and_then(|mut state| state.control_spans.remove(&request_id));
+                    if let Some(span) = span {
+                        span.in_scope(|| {
+                            debug!("remote peer acknowledged BLE control message");
+                        });
+                    } else {
+                        debug!(%request_id, "remote peer acknowledged BLE control message");
+                    }
                     self.emit(BluetoothEvent::ControlSent { request_id });
                 }
                 BluetoothControlAction::Expired { message_id, .. } => self.emit_failure(
@@ -570,6 +759,16 @@ impl BluetoothRuntime {
             message: message.into(),
             retryable,
         });
+    }
+}
+
+fn control_kind(message: &BluetoothControlMessage) -> &'static str {
+    match message {
+        BluetoothControlMessage::InvitationInfo { .. } => "invitationInfo",
+        BluetoothControlMessage::JoinHello { .. } => "joinHello",
+        BluetoothControlMessage::JoinResponse { .. } => "joinResponse",
+        BluetoothControlMessage::JoinConfirmation { .. } => "joinConfirmation",
+        BluetoothControlMessage::GroupControl { .. } => "groupControl",
     }
 }
 
@@ -654,6 +853,12 @@ mod tests {
                 now_ms,
             )
             .unwrap();
+        assert!(sender
+            .state
+            .lock()
+            .unwrap()
+            .control_spans
+            .contains_key(&logical_request));
 
         let packets: Vec<_> = sender_backend
             .commands()
@@ -698,8 +903,132 @@ mod tests {
             .lock()
             .unwrap()
             .contains(&BluetoothEvent::ControlSent {
-                request_id: logical_request,
+                request_id: logical_request.clone(),
             }));
+        assert!(!sender
+            .state
+            .lock()
+            .unwrap()
+            .control_spans
+            .contains_key(&logical_request));
+    }
+
+    #[test]
+    fn packet_completion_restores_and_releases_its_span() {
+        let backend = Arc::new(FakeBluetoothBackend::default());
+        let runtime = BluetoothRuntime::new(backend.clone());
+        runtime.attach_event_handler(Arc::new(|_| {})).unwrap();
+        let logical_request = RequestId::new();
+        let now_ms = unix_now_ms();
+        runtime
+            .dispatch(
+                BluetoothCommand::SendControl {
+                    request_id: logical_request.clone(),
+                    handle: PeerHandle(9),
+                    message: BluetoothControlMessage::JoinConfirmation {
+                        payload: vec![1, 2, 3],
+                    },
+                    expires_at_ms: now_ms.saturating_add(10_000),
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let packet_request = backend
+            .commands()
+            .into_iter()
+            .find_map(|command| match command {
+                BluetoothBackendCommand::SendPacket { request_id, .. } => Some(request_id),
+                _ => None,
+            })
+            .expect("control message generated a packet");
+        {
+            let state = runtime.state.lock().unwrap();
+            assert!(state.packet_requests.contains_key(&packet_request));
+            assert!(state.control_spans.contains_key(&logical_request));
+        }
+
+        backend
+            .inject(BluetoothBackendEvent::PacketSent {
+                request_id: packet_request.clone(),
+            })
+            .unwrap();
+
+        let state = runtime.state.lock().unwrap();
+        assert!(!state.packet_requests.contains_key(&packet_request));
+        assert!(state.control_spans.contains_key(&logical_request));
+    }
+
+    #[test]
+    fn oversized_control_is_rejected_before_retaining_spans_or_dispatching_packets() {
+        let backend = Arc::new(FakeBluetoothBackend::default());
+        let runtime = BluetoothRuntime::new(backend.clone());
+        runtime.attach_event_handler(Arc::new(|_| {})).unwrap();
+        let logical_request = RequestId::new();
+        let now_ms = unix_now_ms();
+
+        let error = runtime
+            .dispatch(
+                BluetoothCommand::SendControl {
+                    request_id: logical_request.clone(),
+                    handle: PeerHandle(10),
+                    message: BluetoothControlMessage::JoinResponse {
+                        payload: vec![0; BLUETOOTH_MAX_CONTROL_PAYLOAD_BYTES + 1],
+                    },
+                    expires_at_ms: now_ms.saturating_add(10_000),
+                },
+                now_ms,
+            )
+            .unwrap_err();
+
+        assert!(matches!(error, BluetoothBackendError::Protocol { .. }));
+        let state = runtime.state.lock().unwrap();
+        assert!(!state.control_spans.contains_key(&logical_request));
+        assert!(state.packet_requests.is_empty());
+        assert!(backend.commands().is_empty());
+    }
+
+    #[test]
+    fn runtime_fragments_using_the_negotiated_peer_packet_limit() {
+        let backend = Arc::new(FakeBluetoothBackend::default());
+        let runtime = BluetoothRuntime::new(backend.clone());
+        runtime.attach_event_handler(Arc::new(|_| {})).unwrap();
+        let connection_request = RequestId::new();
+        backend
+            .inject(BluetoothBackendEvent::Connected {
+                request_id: connection_request,
+                handle: PeerHandle(12),
+                max_packet_bytes: 64,
+            })
+            .unwrap();
+
+        let now_ms = unix_now_ms();
+        runtime
+            .dispatch(
+                BluetoothCommand::SendControl {
+                    request_id: RequestId::new(),
+                    handle: PeerHandle(12),
+                    message: BluetoothControlMessage::JoinHello {
+                        payload: vec![7; 300],
+                    },
+                    expires_at_ms: now_ms.saturating_add(10_000),
+                },
+                now_ms,
+            )
+            .unwrap();
+
+        let packets = backend
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                BluetoothBackendCommand::SendPacket { packet, .. } => Some(packet),
+                _ => None,
+            });
+        assert!(packets.count() > 1);
+        assert!(backend.commands().into_iter().all(|command| match command {
+            BluetoothBackendCommand::SendPacket { packet, .. } => packet.len() <= 64,
+            _ => true,
+        }));
     }
 }
 

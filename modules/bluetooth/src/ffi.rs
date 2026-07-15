@@ -61,10 +61,11 @@ impl BluetoothEventSink {
         });
     }
 
-    pub fn connected(&self, request_id: String, handle: u64) {
+    pub fn connected(&self, request_id: String, handle: u64, max_packet_bytes: u32) {
         self.emit(crate::BluetoothBackendEvent::Connected {
             request_id: model::RequestId::from_string(request_id),
             handle: crate::PeerHandle(handle),
+            max_packet_bytes,
         });
     }
 

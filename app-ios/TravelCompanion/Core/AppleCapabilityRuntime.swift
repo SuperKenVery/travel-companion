@@ -287,8 +287,12 @@ private func deliverBluetoothEvent(_ event: BluetoothEvent, to sink: BluetoothEv
         sink.stopped(requestId: requestID)
     case let .peerDiscovered(peerID, handle):
         sink.peerDiscovered(peerId: peerID, handle: handle)
-    case let .connected(requestID, handle):
-        sink.connected(requestId: requestID, handle: handle)
+    case let .connected(requestID, handle, maxPacketBytes):
+        sink.connected(
+            requestId: requestID,
+            handle: handle,
+            maxPacketBytes: maxPacketBytes
+        )
     case let .disconnected(handle, reason):
         sink.disconnected(handle: handle, reason: reason)
     case let .packetReceived(handle, packet):
