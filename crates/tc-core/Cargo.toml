@@ -1,0 +1,34 @@
+[package]
+name = "tc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rcgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tc-bluetooth = { path = "../../modules/tc-bluetooth" }
+tc-call = { path = "../tc-call" }
+tc-call-system = { path = "../../modules/tc-call-system" }
+tc-crypto = { path = "../tc-crypto" }
+tc-document = { path = "../tc-document" }
+tc-group-auth = { path = "../tc-group-auth" }
+tc-im = { path = "../tc-im" }
+tc-location = { path = "../../modules/tc-location" }
+tc-location-logic = { path = "../tc-location-logic" }
+tc-model = { path = "../tc-model" }
+tc-notifications = { path = "../../modules/tc-notifications" }
+tc-peer-transport = { path = "../../modules/tc-peer-transport" }
+tc-protocol = { path = "../tc-protocol" }
+tc-ranging = { path = "../../modules/tc-ranging" }
+tc-replication = { path = "../tc-replication" }
+tc-resources = { path = "../tc-resources" }
+tc-secure-storage = { path = "../../modules/tc-secure-storage" }
+tc-store = { path = "../tc-store" }
+
+[dev-dependencies]
+base64.workspace = true
+tempfile.workspace = true

@@ -1,32 +1,84 @@
 name: TravelCompanion
+
 options:
   deploymentTarget:
     iOS: "26.0"
   createIntermediateGroups: true
+  groupSortPosition: top
+
+packages:
+  TcBluetoothApple:
+    path: modules/tc-bluetooth
+  TcPeerTransportApple:
+    path: modules/tc-peer-transport
+  TcLocationApple:
+    path: modules/tc-location
+  TcRangingApple:
+    path: modules/tc-ranging
+  TcNotificationsApple:
+    path: modules/tc-notifications
+  TcCallSystemApple:
+    path: modules/tc-call-system
+  TcSecureStorageApple:
+    path: modules/tc-secure-storage
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
-    ENABLE_USER_SCRIPT_SANDBOXING: true
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: true
+    ENABLE_USER_SCRIPT_SANDBOXING: false
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     TARGETED_DEVICE_FAMILY: "1"
     SUPPORTS_MACCATALYST: false
     SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: false
+    SUPPORTED_PLATFORMS: iphoneos
+    HEADER_SEARCH_PATHS:
+      - "$(inherited)"
+      - "$(SRCROOT)/bindings/tc-app-ffi/include"
+
 targets:
   TravelCompanion:
     type: application
     platform: iOS
     sources:
-      - path: Sources
+      - path: app-ios/TravelCompanion
+    resources:
+      - path: app-ios/TravelCompanion/Resources
+    dependencies:
+      - package: TcBluetoothApple
+      - package: TcPeerTransportApple
+      - package: TcLocationApple
+      - package: TcRangingApple
+      - package: TcNotificationsApple
+      - package: TcCallSystemApple
+      - package: TcSecureStorageApple
+    preBuildScripts:
+      - name: Build Rust Core
+        script: '"$SRCROOT/scripts/build-rust-ios.sh" "$CONFIGURATION"'
+        basedOnDependencyAnalysis: false
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ken.TravelCompanionValidation
+        PRODUCT_BUNDLE_IDENTIFIER: com.ken.TravelCompanion
         PRODUCT_NAME: TravelCompanion
-        INFOPLIST_FILE: Sources/App/Info.plist
-        CODE_SIGN_ENTITLEMENTS: Sources/App/TravelCompanion.entitlements
+        INFOPLIST_FILE: app-ios/TravelCompanion/App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: app-ios/TravelCompanion/App/TravelCompanion.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: true
         ENABLE_PREVIEWS: true
+        SWIFT_OBJC_BRIDGING_HEADER: app-ios/TravelCompanion/Core/TravelCompanion-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/bindings/tc-app-ffi/include"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/build/ios/$(CONFIGURATION)"
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - -ltc_app_ffi
+          - -lsqlite3
+          - -framework
+          - Security
         TARGETED_DEVICE_FAMILY: "1"
         SUPPORTED_PLATFORMS: iphoneos
       configs:
@@ -35,16 +87,17 @@ targets:
     scheme:
       testTargets:
         - TravelCompanionTests
+
   TravelCompanionTests:
     type: bundle.unit-test
     platform: iOS
     sources:
-      - path: Tests
+      - path: app-ios/TravelCompanionTests
     dependencies:
       - target: TravelCompanion
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.ken.TravelCompanionValidationTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.ken.TravelCompanionTests
         GENERATE_INFOPLIST_FILE: true
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/TravelCompanion.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/TravelCompanion"
         BUNDLE_LOADER: "$(TEST_HOST)"

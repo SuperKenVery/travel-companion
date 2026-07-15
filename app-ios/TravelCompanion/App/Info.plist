@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh_CN</string>
+	<key>CFBundleDisplayName</key>
+	<string>旅行伴侣</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.5.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CLRequireExplicitServiceSession</key>
+	<true/>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>旅行期间使用蓝牙发现同行成员，并接收加密的位置请求、同步提示和离线来电信令。</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>旅行期间通过蓝牙向附近群组成员提供经过认证的短控制信令。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_tc-travel._tcp</string>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>拍摄照片并发送给当前旅行群组中的成员。</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>通过 Bonjour 和点对点本地链路发现已认证的群组成员，同步消息、位置、地点和行程。</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>开始旅行后，即使锁屏或进入后台，也可按系统允许程度保存位置并回应同行成员的请求。</string>
+	<key>NSLocationTemporaryUsageDescriptionDictionary</key>
+	<dict>
+		<key>PreciseTripLocation</key>
+		<string>在你明确开始旅行后，提高同行位置请求的坐标精度。</string>
+	</dict>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>在离线同行雷达中显示你与群组成员的相对位置。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>录制语音消息以及与同行成员进行一对一离线语音通话。</string>
+	<key>NSNearbyInteractionUsageDescription</key>
+	<string>双方确认并保持 App 在前台时，使用 UWB 测量同行成员的精确距离和方向。</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>选择照片并发送给当前旅行群组中的成员。</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>bluetooth-central</string>
+		<string>bluetooth-peripheral</string>
+		<string>location</string>
+	</array>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+		<string>bluetooth-le</string>
+		<string>gps</string>
+		<string>wifi</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+</dict>
+</plist>

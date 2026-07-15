@@ -1,83 +1,100 @@
-# Travel Companion — 第 11 节真机技术验证
+# Travel Companion
 
-这是 `TASK.md` 第 11 节的 Debug-only vertical slice。它不是主 App UI，也不宣称已经得到两机/四机实验结论；它提供可安装到 iOS 26 真机、执行实验并导出原始数据与 P50/P95 汇总的代码。
+Travel Companion 是一个面向 iOS 26、UWB iPhone 的离线同行实验性 App。产品目标是让群组、定位、聊天、语音通话、地点标注和 `Trip.md` 通过附近设备间的 BLE 控制面与 Bonjour/AWDL 数据面工作，而不依赖互联网账户、云同步、APNs 或公网服务。
 
-## 当前技术路线
+> 当前状态：仓库已经按 [`TASK.md`](TASK.md) 第 12 节建立 Rust-first polyglot 正式工程，并落下覆盖 M1–M5 的领域逻辑、Apple backend、GUI FFI 和 SwiftUI 界面。这里的“已实现”只表示代码路径存在并有相应的自动化检查；它不表示第 14 节真机验收已经通过。正式 App 仍需要两台及以上真机完成 BLE、AWDL、后台定位、UWB、后台提醒和离线通话验证，也尚未完成 M6 发布准备。
 
-- Core Bluetooth 同时承担附近发现和应用层入群。创建者生成 6 位 PIN；加入者只输入一次。PIN 经 HKDF 派生群组密钥，BLE `groupHello` 经 AES-GCM 认证后确认成员，设备仅持久化派生凭据。
-- 每台已入群设备自动发布并浏览两个 Bonjour 服务：`_tc-validate._tcp` 与 `_tc-voice._udp`。listener、browser 和 connection 都设置 `includePeerToPeer`/`peerToPeerIncluded = true`，允许 Network framework 选择 AWDL。
-- 每对设备按稳定 device ID 只由一侧主动拨号，另一侧接受连接；服务再次出现或连接失败时自动重连，无需系统 Wi‑Fi Aware 配对或逐对选择 peer。
-- bulk 数据通道使用 iOS 26 `NetworkConnection` + `Coder` over TLS；首包必须通过群组密钥 HMAC，之后才承载 ping、文字、cursor anti-entropy、UWB token 和带 SHA-256 校验的 64 KiB 分块文件。
-- realtime 语音通道使用 Bonjour UDP + `Coder` 和 `.interactiveVoice`，每个音频包都验证群组 HMAC 后才播放。
-- BLE 控制消息具备版本、UUID、发送者、序号、TTL、AES-GCM、分片/重组、ACK、去重、state restoration 与系统自动重连。
-- `dataAvailable` → Bonjour 数据连接 cursor 拉取 → 本地事件去重/持久化 → 本地通知；失败时生成通用通知。
-- 其余 vertical slice 包括三种后台定位策略、UWB 精确定位、CallKit 离线来电、JSON Lines 日志与能耗采样。
+## 从这里开始
 
-## 工程要求
-
-- Xcode 26、iOS Deployment Target 26.0、Swift 6 strict concurrency。
-- 仅 iPhone 真机；UWB 能力以运行时检查为准。
-- 至少两台设备完成端到端实验；多连接上限验证建议四台设备。
-- 所有设备安装同一团队、同一 bundle ID 签名的 Debug 构建。
-
-工程由 `project.yml` 生成，devShell 包含 `xcodegen`、`libimobiledevice` 和 `openssl`：
+仓库工具链只通过 `flake.nix`/`flake.lock` 提供。除主机 Xcode 与 iPhoneOS SDK 外，不应另行使用全局 Rust、XcodeGen、SQLite 或真机工具作为项目工作流。
 
 ```sh
 nix develop
-xcodegen generate
-open TravelCompanion.xcodeproj
+./scripts/check.sh
 ```
 
-不再需要 Wi‑Fi Aware entitlement。`Info.plist` 已声明本地网络用途、`NSBonjourServices`、蓝牙用途与 central/peripheral 后台模式。
-
-## 首次入群与自动连接
-
-1. 所有 iPhone 打开 App，在“总览”点“开始全部验证”，授予蓝牙和本地网络权限。
-2. A 机在“连接”页点“创建群组并生成 PIN”，把 6 位 PIN 告知同行者。
-3. B、C 等设备各自输入一次 PIN 并点“加入群组”。附近 BLE 链路收到并成功解密 `groupHello` 后，“PIN 已认证成员”会更新。
-4. 入群后无需再操作：每台设备会自动发布/浏览 Bonjour，等待数据连接变为 ready。
-5. App 重启会读取派生群组凭据并恢复 BLE 与 Bonjour。退出群组会删除本机凭据并停止群组网络任务。
-
-为了验证无基础设施场景，建议关闭蜂窝数据、离开已知 Wi‑Fi，但保留 Wi‑Fi 与蓝牙开关开启。`pathAudit` 会记录可用 interface、`awdlObserved`、`usesWiFi` 和 `peerToPeerIncluded`。`peerToPeerIncluded=true` 代表允许 P2P；是否实际选择 `awdl0` 由系统决定，应以真机 path audit 为准。
-
-## 11.1 Bonjour / AWDL 实验
-
-1. 连续点击“测小消息 RTT”至少 30 次，导出 `smallMessage/roundTrip` 的 P50/P95。
-2. 发送 5 MiB 分块文件，确认接收端出现 `receiveComplete`，发送端出现 `acknowledged` 与 `bytesPerSecond`。
-3. 让一台设备离开范围再回来，确认 Bonjour 服务重现后数据/语音连接自动恢复；分块资源通过缺块清单续传。
-4. 分别用 2 台、4 台记录 BLE 认证成员、Bonjour 发现成员、连接数、重连与 path audit。
-5. 通话时检查 `voicePathAudit`；普通同步与实时语音的能耗分开采集。
-
-## 11.2 BLE 后台实验
-
-1. 确认 Central、Peripheral 均为 `poweredOn`，双方出现 GATT ready/subscribed 和 `groupPairing/authenticated`。
-2. 分别在前台、后台、锁屏状态发送位置、精确定位、`dataAvailable` 和 `callOffer`。
-3. 运行 30 分钟重复请求，导出成功率与 ACK/响应 P50/P95。
-4. 验证重复 hint 去重、hint 丢失后的主动 anti-entropy，以及系统回收后的 state restoration。
-5. 用户从 App Switcher 强制退出应单独记录为“不保证唤醒”。
-
-## 11.3–11.5 其他实验
-
-- 后台定位：三种策略使用相同行走路线和请求序列，比较响应率、sample age、精度、P50/P95 与能耗。
-- UWB：双方确认后通过 Bonjour/TLS 数据面交换 discovery token；任一端进后台即回退 GPS。
-- 离线来电：BLE 发送 offer/answer/end，接听后通过 Bonjour peer-to-peer UDP 发送音频；验证锁屏、音频路由和短暂断连。
-
-## 自动检查
+也可以从 shell 外执行同一检查；命令会明确进入 devShell：
 
 ```sh
-xcodebuild \
-  -project TravelCompanion.xcodeproj \
-  -scheme TravelCompanion \
-  -configuration Debug \
-  -destination 'generic/platform=iOS' \
-  CODE_SIGNING_ALLOWED=NO \
-  build-for-testing
+nix develop --command ./scripts/check.sh
 ```
 
-2026-07-14 已用 iPhoneOS 26.5 SDK 通过 App 与测试 bundle 的 `build-for-testing`。单元测试覆盖 PIN 派生、AES-GCM 控制帧、篡改检测、事件去重、资源完整性与百分位统计；无线电行为仍必须在至少两台真机上验证。
+`scripts/check.sh` 依次运行 Rust 格式、Clippy、workspace tests、XcodeGen，以及无签名的 generic iPhoneOS `build-for-testing`。它是构建门禁，不会替代真机无线电、锁屏、音频路由或能耗实验。
 
-## 安全边界
+完整环境说明见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
-当前 6 位 PIN 方案用于验证“每人入群一次”的交互和群组隔离，不足以抵抗离线穷举。正式产品应采用 PAKE 或带邀请者公钥、随机群组密钥、尝试次数限制与密钥轮换的入群协议。
+## 架构概览
 
-Debug TLS identity 和证书 pin 只验证 TLS/Coder framing，不代表正式成员身份。发布实现必须使用每群/每成员凭据，并把派生群组密钥从 `UserDefaults` 迁移到 Keychain。
+```text
+SwiftUI feature views
+        |
+        v
+TravelCore.swift
+        |
+        | public C ABI + value-only JSON
+        v
+tc-app-ffi  --->  tc-core
+                    |
+                    +--> domain/store/replication/resource crates
+                    |
+                    +--> platform-neutral tc-* capability contracts
+                                      |
+                       module command/event queue
+                                      |
+                                      v
+                         AppleCapabilityRuntime (thin router)
+                                      |
+          +---------------------------+---------------------------+
+          v             v             v             v             v
+       Bluetooth   Peer transport   Location       UWB      Notifications/
+       Swift pkg     Swift pkg      Swift pkg    Swift pkg   CallKit/Keychain
+```
+
+- `crates/` 放置平台无关的模型、密码学、入群、协议、SQLite 事件日志、复制、资源、定位逻辑、IM、文档、通话与顶层核心。
+- `modules/tc-*/` 是纵向自包含的 polyglot capability module：同一目录含 Rust 语义 API、fake backend、Swift Package 与 Apple framework 实现。
+- `bindings/tc-app-ffi/` 是 GUI 可见的唯一 Rust ABI。SwiftUI 不直接依赖内部 crate 或 module binding。
+- `app-ios/TravelCompanion/` 只负责 SwiftUI、App 生命周期、权限文案，以及把普通 command/event 路由到相应 Apple backend。
+- `project.yml`、`scripts/` 和 `xtask/` 负责可重复装配；生成的 Xcode 工程与构建产物不作为源码提交。
+
+更精确的依赖方向、FFI 层次与数据流见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+
+## 当前实现范围
+
+| 阶段 | 正式工程中已有的代码 | 尚不能宣称完成的部分 |
+| --- | --- | --- |
+| M0 | Debug-only 技术验证工程已归档到 `prototypes/ios-validation-lab/` | 归档中没有两机/四机实验结论；正式架构仍需重新做真机基线 |
+| M1 | 身份/PAKE、群组、BLE/peer transport、事件存储、复制与资源基础设施 | 2–4 台真机入群、断线补同步、无公网审计 |
+| M2 | 旅行会话、Core Location、UWB、通知、精确定位流程和同行雷达 | 锁屏/后台成功率、GPS/UWB 降级、权限与能耗真机验证 |
+| M3 | 群聊/私聊、文字与媒体 UI、资源存储/分块、提示和同步处理代码 | 后台 `dataAvailable` 端到端、媒体中断续传与多设备到达状态 |
+| M4 | 通话状态机、BLE 信令、CallKit/音频 backend 与实时传输代码 | 无互联网双机通话、锁屏来电、路由/中断/重连测试 |
+| M5 | 地点事件与离线列表、MapKit 可选增强、`Trip.md` revision/lease/conflict UI | 多设备同步、无底图验收、网络分区冲突保全验证 |
+
+详细证据和边界见 [`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md)。M6 的 2/4/8 设备、长时间后台、Energy Log、磁盘/权限故障、诊断导出、本地化和发布检查尚未完成。
+
+## M0 原型归档
+
+[`prototypes/ios-validation-lab`](prototypes/ios-validation-lab) 是第 11 节实验 harness，不是正式 App，也不是正式核心的事实源。归档 README 记录了一次 generic iPhoneOS `build-for-testing`，但明确没有给出至少两台设备的实验结果。
+
+原型中的 Debug TLS identity、PIN 直接派生密钥、单 cursor 与 JSON 文件存储只用于探索 Apple API；这些设计不得复制回正式实现。正式工程使用独立的领域/复制/存储层与 Keychain capability contract。
+
+## 平台与验收边界
+
+- 目标是 iPhoneOS 26.0；项目不提供 Simulator、iPad、Mac Catalyst、iOS 25 或 Multipeer Connectivity fallback。
+- MapKit 底图只是增强层。离线承诺针对坐标、同行雷达、地点列表和同步，不承诺下载 Apple 离线地图包。
+- 系统强制退出、无线电关闭、权限撤回或不给予后台执行时间时，不承诺即时位置、消息提醒或来电。
+- 单元测试和无签名构建不能证明 AWDL 实际被选择、BLE 能在锁屏唤醒、UWB 正确降级或 CallKit 音频端到端可用。
+- 当前仓库不是 M6 完成品，不应作为可发布、稳定或已通过第 14 节验收的版本描述。
+
+## 目录
+
+```text
+crates/                     Rust 领域与基础设施
+modules/tc-*/               Rust capability + Apple Swift Package
+bindings/tc-app-ffi/        面向 GUI 的公共 C ABI
+app-ios/TravelCompanion/    SwiftUI App 与薄装配层
+app-ios/TravelCompanionTests/
+prototypes/ios-validation-lab/
+docs/
+scripts/
+xtask/
+```

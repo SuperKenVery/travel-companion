@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/tc-model",
+  "crates/tc-crypto",
+  "crates/tc-group-auth",
+  "crates/tc-protocol",
+  "crates/tc-store",
+  "crates/tc-replication",
+  "crates/tc-resources",
+  "crates/tc-location-logic",
+  "crates/tc-im",
+  "crates/tc-document",
+  "crates/tc-call",
+  "crates/tc-core",
+  "modules/tc-bluetooth",
+  "modules/tc-peer-transport",
+  "modules/tc-location",
+  "modules/tc-ranging",
+  "modules/tc-notifications",
+  "modules/tc-call-system",
+  "modules/tc-secure-storage",
+  "bindings/tc-app-ffi",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+rust-version = "1.82"
+
+[workspace.dependencies]
+base64 = "0.22"
+chacha20poly1305 = "0.10"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hkdf = "0.12"
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rcgen = { version = "0.14.8", default-features = false, features = ["crypto", "ring"] }
+rusqlite = "0.32"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+spake2 = "0.4"
+tempfile = "3"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
