@@ -1,0 +1,15 @@
+[package]
+name = "peer-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hmac.workspace = true
+serde.workspace = true
+sha2.workspace = true
+model = { path = "../../crates/model" }
+thiserror.workspace = true
+uniffi.workspace = true
+uuid.workspace = true

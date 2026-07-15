@@ -12,9 +12,9 @@
 
 ## 修改导航
 
-- `crates/`：平台无关的领域模型、协议、安全、存储、复制、资源、定位、IM、文档、通话与顶层 `tc-core` 协调逻辑。
-- `modules/tc-*/`：纵向自包含的 capability；Rust command/event contract、fake backend、Swift Package 和 Apple framework backend 放在同一模块内。
-- `bindings/tc-app-ffi/`：SwiftUI 可见的唯一 Rust UniFFI 门面、module foreign trait 聚合，以及内部 command/snapshot 到 GUI schema 的适配；`generated/` 由脚本更新，不手改。
+- `crates/`：平台无关的领域模型、协议、安全、存储、复制、资源、定位、IM、文档、通话与顶层 `travel-core` 协调逻辑。
+- `modules/*/`：纵向自包含的 capability；Rust command/event contract、fake backend、Swift Package 和 Apple framework backend 放在同一模块内。
+- `bindings/app-ffi/`：SwiftUI 可见的唯一 Rust UniFFI 门面、module foreign trait 聚合，以及内部 command/snapshot 到 GUI schema 的适配；`generated/` 由脚本更新，不手改。
 - `app-ios/TravelCompanion/Core/`：Swift UniFFI 门面、普通值模型和 Apple capability 并发适配。
 - `app-ios/TravelCompanion/Features/`：只通过 `TravelCore` 发送 command、观察 snapshot 的 SwiftUI 页面。
 - `app-ios/TravelCompanion/Design/`：共享视觉组件；`App/`：生命周期、权限声明与系统入口。
@@ -22,12 +22,12 @@
 - `scripts/`、`xtask/`：标准构建与检查入口。
 - `prototypes/ios-validation-lab/`：M0 Debug-only 实验归档，不是正式 App 或设计事实源；不要把其中的临时安全与持久化方案复制回正式实现。
 
-跨边界 schema 变更必须成组核对：`tc-core`、`tc-app-ffi`、生成 binding、`CoreModels.swift`、`TravelCore.swift` 及相关测试。Apple capability 变更必须同时核对 Rust contract/foreign trait、fake backend、Apple backend 和 `AppleCapabilityRuntime` adapter。
+跨边界 schema 变更必须成组核对：`travel-core`、`app-ffi`、生成 binding、`CoreModels.swift`、`TravelCore.swift` 及相关测试。Apple capability 变更必须同时核对 Rust contract/foreign trait、fake backend、Apple backend 和 `AppleCapabilityRuntime` adapter。
 
 ## 架构护栏
 
-- 保持依赖方向：SwiftUI → `TravelCore` → `tc-app-ffi` → `tc-core` → 领域 crate/capability contract → Apple backend。SwiftUI 不直接操作无线电、socket 或数据库，`tc-core` 不依赖 Apple 类型。
-- `AppleCapabilityRuntime` 只负责 foreign trait 装配、命令保序和 actor 跳转；业务规则放在 `tc-core` 或对应领域 crate，不要建立集中实现全部 Apple API 的巨型 adapter。
+- 保持依赖方向：SwiftUI → `TravelCore` → `app-ffi` → `travel-core` → 领域 crate/capability contract → Apple backend。SwiftUI 不直接操作无线电、socket 或数据库，`travel-core` 不依赖 Apple 类型。
+- `AppleCapabilityRuntime` 只负责 foreign trait 装配、命令保序和 actor 跳转；业务规则放在 `travel-core` 或对应领域 crate，不要建立集中实现全部 Apple API 的巨型 adapter。
 - 每个 capability 的 Rust fake 与 Swift adapter 必须实现同一个主 `Backend` foreign trait，包括 typed capability snapshot 和逐项 native operation methods；异步结果通过逐项 typed `EventSink` 方法返回。JSON 只可作为 Rust 内部表示，必须在 capability platform 边界前终止，不得充当 Apple module 的公开 command/event contract。BLE/Network backend 只收发 opaque packet/frame，应用消息 enum、编解码、加密、TTL、ACK、去重和连接认证放在 Rust runtime/protocol crate。测试辅助代码迁就真实的异步 push 契约，不要另建 capability 旁路、通用 `submit(bytes)`、pull/poll 或平行 backend 抽象。
 - Apple framework 对象留在各 backend 的 actor/queue 上，不跨 FFI；请求相关结果在适用时携带 request ID，主动状态/数据事件按各自 typed 字段返回，Rust panic 不得越过 FFI。
 - BLE 只承载认证后的小型控制消息；事件正文、资源和实时音频走 Bonjour/Network framework peer-to-peer 数据面。不得引入公网关键路径、APNs、云服务或 `MultipeerConnectivity` fallback。

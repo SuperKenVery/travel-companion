@@ -28,6 +28,8 @@ Nix 不分发 Apple 的授权 SDK。以下组件必须来自 macOS 主机：
 
 devShell 通过 `TC_HOST_XCRUN`、`TC_HOST_XCODEBUILD` 和 `TC_HOST_DEVELOPER_DIR` 显式引用这些主机组件。这个例外不意味着可以绕过 devShell 使用另一套 Rust/XcodeGen 工具链。
 
+devShell 会移除 nixpkgs 默认导出的 `LD=ld`。Xcode 会把继承的环境变量解释为 build setting，而 SwiftPM 的 `Ld` 阶段需要由 clang driver 处理 `-Xlinker` 等参数；把 `LD` 覆盖成裸 `ld` 会导致 Apple module 的静态 product 链接失败。已经从旧 devShell 启动的 Xcode 进程需要完全退出后，从新的 `nix develop` 会话或 Finder 重新启动。
+
 ## 标准检查
 
 从仓库根目录运行：
@@ -73,12 +75,12 @@ xcodegen generate
 ./scripts/build-rust-ios.sh Release
 ```
 
-脚本使用 Fenix 提供的 iOS Rust target，并使用主机 iPhoneOS SDK 的 clang/SQLite。产物写入 `build/ios/<Configuration>/libtc_app_ffi.a`，随后从该静态库重新生成 `bindings/tc-app-ffi/generated/` 下的 Swift sources 与 C headers。`build/` 和 `target/` 都是生成目录；UniFFI 生成文件是 Xcode 编译输入，修改 Rust export 后不要手工编辑它们。
+脚本使用 Fenix 提供的 iOS Rust target，并使用主机 iPhoneOS SDK 的 clang/SQLite。产物写入 `build/ios/<Configuration>/libapp_ffi.a`，随后从该静态库重新生成 `bindings/app-ffi/generated/` 下的 Swift sources 与 C headers。`build/` 和 `target/` 都是生成目录；UniFFI 生成文件是 Xcode 编译输入，修改 Rust export 后不要手工编辑它们。
 
 只需从已有 host 静态库刷新 binding 时可运行：
 
 ```sh
-./scripts/generate-uniffi-swift.sh target/debug/libtc_app_ffi.a
+./scripts/generate-uniffi-swift.sh target/debug/libapp_ffi.a
 ```
 
 ## Xcode 与真机

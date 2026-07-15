@@ -30,11 +30,11 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 正式工程中已有：
 
-- `tc-model`、`tc-crypto`、`tc-group-auth`：稳定 ID、事件模型、签名/加密 primitive 与 PAKE 入群 primitive；
-- `tc-store`、`tc-replication`：SQLite 原始事件、sender sequence、签名验证、frontier/sparse gap、relay 与逐目标 delivery 状态；
-- `tc-resources`：manifest/chunk 校验、磁盘恢复、重试、取消、原子落盘与 content-addressed object；
-- `tc-bluetooth` 与 `tc-peer-transport`：平台无关 command/event、fake backend 和 Apple Core Bluetooth/Network framework backend；
-- `tc-core` 与 SwiftUI：创建群、PIN 加入、离群、成员/连接快照和诊断入口。
+- `model`、`crypto`、`group-auth`：稳定 ID、事件模型、签名/加密 primitive 与 PAKE 入群 primitive；
+- `store`、`replication`：SQLite 原始事件、sender sequence、签名验证、frontier/sparse gap、relay 与逐目标 delivery 状态；
+- `resources`：manifest/chunk 校验、磁盘恢复、重试、取消、原子落盘与 content-addressed object；
+- `bluetooth` 与 `peer-transport`：平台无关 command/event、fake backend 和 Apple Core Bluetooth/Network framework backend；
+- `travel-core` 与 SwiftUI：创建群、PIN 加入、离群、成员/连接快照和诊断入口。
 
 自动化主要验证领域不变量和 fake backend contract，例如事件去重、签名、精确缺口、relay 不等于目标送达、资源损坏恢复与异步提交。它没有验证：
 
@@ -50,11 +50,11 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 正式工程中已有：
 
-- `tc-location` 及 Apple backend：`CLServiceSession`、`CLBackgroundActivitySession`、`CLLocationUpdate`、缓存样本和按需采样 command/event；
-- `tc-ranging` 及 Apple backend：Nearby Interaction session、discovery token、距离/方向独立字段与前后台终止路径；
-- `tc-location-logic`：GPS 距离/方位与 UWB 距离/方向的显式来源、stale 和降级逻辑；
-- `tc-notifications`：本地通知 command/event 与合并键；
-- `tc-core` 与 SwiftUI：旅行开始/结束、位置共享开关、BLE 位置/精确定位请求、确认/拒绝/超时、同行雷达、成员详情和 blocker UI。
+- `location` 及 Apple backend：`CLServiceSession`、`CLBackgroundActivitySession`、`CLLocationUpdate`、缓存样本和按需采样 command/event；
+- `ranging` 及 Apple backend：Nearby Interaction session、discovery token、距离/方向独立字段与前后台终止路径；
+- `location-logic`：GPS 距离/方位与 UWB 距离/方向的显式来源、stale 和降级逻辑；
+- `notifications`：本地通知 command/event 与合并键；
+- `travel-core` 与 SwiftUI：旅行开始/结束、位置共享开关、BLE 位置/精确定位请求、确认/拒绝/超时、同行雷达、成员详情和 blocker UI。
 
 仍需真机证明：
 
@@ -71,9 +71,9 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 正式工程中已有：
 
-- `tc-im` 的群聊/私聊值模型与消息 materialization；
-- `tc-core` 的消息/manifest 事件发布、`dataAvailable`、wire digest/event/ack/resource-request/chunk 处理和本地通知 command；
-- `tc-resources` 的持久 manifest、分块校验、缺块恢复、取消/重试 primitive；
+- `im` 的群聊/私聊值模型与消息 materialization；
+- `travel-core` 的消息/manifest 事件发布、`dataAvailable`、wire digest/event/ack/resource-request/chunk 处理和本地通知 command；
+- `resources` 的持久 manifest、分块校验、缺块恢复、取消/重试 primitive；
 - SwiftUI 的会话列表、文字发送、PhotosPicker、真机相机、AAC 语音录制/试听、图片缩略图、语音播放和资源进度/取消/重试 UI。
 
 尚未由仓库证据证明：
@@ -90,9 +90,9 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 正式工程中已有：
 
-- `tc-call` 的 offer/answer/reject/end 状态机、冲突处理和重连状态；
-- `tc-call-system` Apple backend 的 CallKit transaction、`AVAudioSession`、音频 engine、route/interruption 事件与轻量 jitter 处理；
-- BLE call signal 与 peer transport realtime frame 的 core 路由；
+- `call` 的 offer/answer/reject/end 状态机、冲突处理和重连状态；
+- `call-system` Apple backend 的 CallKit transaction、`AVAudioSession`、音频 engine、route/interruption 事件与轻量 jitter 处理；
+- BLE call signal 与 peer transport realtime frame 的 travel-core 路由；
 - SwiftUI 的呼叫、接听、拒绝和结束入口。
 
 尚未由正式 App 的真机报告证明：
@@ -111,7 +111,7 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 - 地点创建、编辑、删除事件和 materialized snapshot；
 - 离线优先的地点坐标列表，以及只作为增强层的 MapKit 成员/地点视图；
-- `tc-document` 的不可变 revision、内容哈希、短期 lease、确定性 head 和冲突副本保留；
+- `document` 的不可变 revision、内容哈希、短期 lease、确定性 head 和冲突副本保留；
 - `Trip.md` 分离的预览/原生编辑 UI、lease 状态、保存、冲突比较和未保存保护。
 
 仍需真机/多副本证明：
@@ -124,7 +124,7 @@ M1–M5 当前整体应描述为“正式架构下的实现候选已落盘，验
 
 ## 自动化证据的边界
 
-正式 workspace 当前包含 Rust 单元测试，覆盖模型、密码学、PAKE、存储、复制、资源、定位、IM、文档、通话、capability fake backend、core 与 GUI UniFFI；七个 fake 都通过与 Swift 相同的 foreign `Backend` trait 验证 typed capability snapshot、逐项 operation methods 与 typed `EventSink`，binding 测试还覆盖 sink 先注册再派发初始操作、操作栈内同步回调重入不死锁和幂等 shutdown。iOS 测试 target 目前只有 command 编码、资源进度与空快照 round-trip 等模型测试。
+正式 workspace 当前包含 Rust 单元测试，覆盖模型、密码学、PAKE、存储、复制、资源、定位、IM、文档、通话、capability fake backend、travel-core 与 GUI UniFFI；七个 fake 都通过与 Swift 相同的 foreign `Backend` trait 验证 typed capability snapshot、逐项 operation methods 与 typed `EventSink`，binding 测试还覆盖 sink 先注册再派发初始操作、操作栈内同步回调重入不死锁和幂等 shutdown。iOS 测试 target 目前只有 command 编码、资源进度与空快照 round-trip 等模型测试。
 
 标准入口是：
 

@@ -30,7 +30,7 @@
 	<string>旅行期间通过蓝牙向附近群组成员提供经过认证的短控制信令。</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_tc-travel._tcp</string>
+		<string>_travel._tcp</string>
 	</array>
 	<key>NSCameraUsageDescription</key>
 	<string>拍摄照片并发送给当前旅行群组中的成员。</string>

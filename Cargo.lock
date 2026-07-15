@@ -37,6 +37,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
+name = "app-ffi"
+version = "0.1.0"
+dependencies = [
+ "bluetooth",
+ "call-system",
+ "location",
+ "location-logic",
+ "model",
+ "notifications",
+ "peer-transport",
+ "ranging",
+ "secure-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "travel-core",
+ "uniffi",
+]
+
+[[package]]
 name = "askama"
 version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -174,6 +195,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bluetooth"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "protocol",
+ "serde",
+ "thiserror",
+ "uniffi",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -184,6 +216,25 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
+name = "call"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "call-system"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+ "uniffi",
+]
 
 [[package]]
 name = "camino"
@@ -324,6 +375,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "ed25519-dalek",
+ "hkdf",
+ "rand_core",
+ "serde",
+ "sha2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -418,6 +483,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "document"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "model",
+ "serde",
+ "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -574,6 +650,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "group-auth"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "hkdf",
+ "model",
+ "serde",
+ "sha2",
+ "spake2",
+ "thiserror",
+ "zeroize",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -625,6 +715,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
 dependencies = [
  "digest",
+]
+
+[[package]]
+name = "im"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -694,6 +793,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
+name = "location"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+ "uniffi",
+]
+
+[[package]]
+name = "location-logic"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+]
+
+[[package]]
 name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -712,6 +829,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "nom"
 version = "7.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -719,6 +845,16 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
+]
+
+[[package]]
+name = "notifications"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+ "uniffi",
 ]
 
 [[package]]
@@ -775,6 +911,19 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
+
+[[package]]
+name = "peer-transport"
+version = "0.1.0"
+dependencies = [
+ "hmac",
+ "model",
+ "serde",
+ "sha2",
+ "thiserror",
+ "uniffi",
+ "uuid",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -837,6 +986,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -861,6 +1021,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ranging"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+ "uniffi",
+]
+
+[[package]]
 name = "rcgen"
 version = "0.14.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -871,6 +1041,31 @@ dependencies = [
  "time",
  "x509-parser",
  "yasna",
+]
+
+[[package]]
+name = "replication"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "model",
+ "serde",
+ "serde_json",
+ "store",
+ "thiserror",
+]
+
+[[package]]
+name = "resources"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "model",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
@@ -971,6 +1166,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "secure-storage"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "serde",
+ "thiserror",
+ "uniffi",
+ "zeroize",
 ]
 
 [[package]]
@@ -1114,6 +1320,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "model",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1145,253 +1363,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tc-app-ffi"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tc-bluetooth",
- "tc-call-system",
- "tc-core",
- "tc-location",
- "tc-location-logic",
- "tc-model",
- "tc-notifications",
- "tc-peer-transport",
- "tc-ranging",
- "tc-secure-storage",
- "tempfile",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-bluetooth"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "tc-protocol",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-call"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
-]
-
-[[package]]
-name = "tc-call-system"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-core"
-version = "0.1.0"
-dependencies = [
- "rcgen",
- "serde",
- "serde_json",
- "tc-bluetooth",
- "tc-call",
- "tc-call-system",
- "tc-crypto",
- "tc-document",
- "tc-group-auth",
- "tc-im",
- "tc-location",
- "tc-location-logic",
- "tc-model",
- "tc-notifications",
- "tc-peer-transport",
- "tc-protocol",
- "tc-ranging",
- "tc-replication",
- "tc-resources",
- "tc-secure-storage",
- "tc-store",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "tc-crypto"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "ed25519-dalek",
- "hkdf",
- "rand_core",
- "serde",
- "sha2",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "tc-document"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "sha2",
- "tc-model",
- "thiserror",
-]
-
-[[package]]
-name = "tc-group-auth"
-version = "0.1.0"
-dependencies = [
- "hkdf",
- "serde",
- "sha2",
- "spake2",
- "tc-crypto",
- "tc-model",
- "thiserror",
- "zeroize",
-]
-
-[[package]]
-name = "tc-im"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
-]
-
-[[package]]
-name = "tc-location"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-location-logic"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
-]
-
-[[package]]
-name = "tc-model"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "tc-notifications"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-peer-transport"
-version = "0.1.0"
-dependencies = [
- "hmac",
- "serde",
- "sha2",
- "tc-model",
- "thiserror",
- "uniffi",
- "uuid",
-]
-
-[[package]]
-name = "tc-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tc-model",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "tc-ranging"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
- "uniffi",
-]
-
-[[package]]
-name = "tc-replication"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tc-crypto",
- "tc-model",
- "tc-store",
- "thiserror",
-]
-
-[[package]]
-name = "tc-resources"
-version = "0.1.0"
-dependencies = [
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "tc-model",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "tc-secure-storage"
-version = "0.1.0"
-dependencies = [
- "serde",
- "tc-model",
- "thiserror",
- "uniffi",
- "zeroize",
-]
-
-[[package]]
-name = "tc-store"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "tc-model",
- "tempfile",
- "thiserror",
 ]
 
 [[package]]
@@ -1504,6 +1475,35 @@ name = "toml_writer"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
+
+[[package]]
+name = "travel-core"
+version = "0.1.0"
+dependencies = [
+ "bluetooth",
+ "call",
+ "call-system",
+ "crypto",
+ "document",
+ "group-auth",
+ "im",
+ "location",
+ "location-logic",
+ "model",
+ "notifications",
+ "peer-transport",
+ "protocol",
+ "ranging",
+ "rcgen",
+ "replication",
+ "resources",
+ "secure-storage",
+ "serde",
+ "serde_json",
+ "store",
+ "tempfile",
+ "thiserror",
+]
 
 [[package]]
 name = "typenum"

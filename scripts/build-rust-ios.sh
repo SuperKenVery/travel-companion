@@ -4,8 +4,17 @@ set -euo pipefail
 configuration="${1:-Debug}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 
-if [[ "${TC_NIX_DEVSHELL:-}" != "1" ]]; then
-  exec nix develop "$root" --command "$0" "$configuration"
+nix_bin="${TC_HOST_NIX:-/nix/var/nix/profiles/default/bin/nix}"
+# Xcode can inherit the devShell marker from the process that launched it while
+# replacing PATH for build phases. Treat the marker as valid only when Cargo is
+# actually available; otherwise enter the devShell again via Nix's stable host
+# path rather than relying on Xcode's restricted PATH.
+if [[ "${TC_NIX_DEVSHELL:-}" != "1" ]] || ! command -v cargo >/dev/null 2>&1; then
+  if [[ ! -x "$nix_bin" ]]; then
+    echo "Nix is required at $nix_bin to build the Rust iPhoneOS artifact." >&2
+    exit 1
+  fi
+  exec "$nix_bin" develop "$root" --command "$0" "$configuration"
 fi
 
 host_xcrun="${TC_HOST_XCRUN:-/usr/bin/xcrun}"
@@ -31,7 +40,7 @@ export CARGO_TARGET_AARCH64_APPLE_IOS_RUSTFLAGS="-C link-arg=-isysroot -C link-a
 unset PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
 
 profile="debug"
-cargo_args=(build --locked -p tc-app-ffi --target "$target")
+cargo_args=(build --locked -p app-ffi --target "$target")
 if [[ "$configuration" != "Debug" ]]; then
   profile="release"
   cargo_args+=(--release)
@@ -42,5 +51,5 @@ cargo "${cargo_args[@]}"
 
 output="$root/build/ios/$configuration"
 mkdir -p "$output"
-cp "$root/target/$target/$profile/libtc_app_ffi.a" "$output/libtc_app_ffi.a"
-"$root/scripts/generate-uniffi-swift.sh" "$output/libtc_app_ffi.a"
+cp "$root/target/$target/$profile/libapp_ffi.a" "$output/libapp_ffi.a"
+"$root/scripts/generate-uniffi-swift.sh" "$output/libapp_ffi.a"

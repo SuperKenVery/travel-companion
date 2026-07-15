@@ -155,11 +155,17 @@ final class TravelCore {
         try fileManager.createDirectory(at: resources, withIntermediateDirectories: true)
 
         let configuration = CoreConfiguration(
-            storagePath: root.appending(path: "travel-companion.sqlite").path(),
-            resourcesPath: resources.path(),
+            storagePath: fileSystemPath(
+                for: root.appending(path: "travel-companion.sqlite")
+            ),
+            resourcesPath: fileSystemPath(for: resources),
             displayName: UIDevice.current.name
         )
         return try string(from: encoder.encode(configuration))
+    }
+
+    nonisolated static func fileSystemPath(for url: URL) -> String {
+        url.path(percentEncoded: false)
     }
 
     private static func string(from data: Data) throws -> String {

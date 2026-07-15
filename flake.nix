@@ -41,6 +41,16 @@
             TC_HOST_XCRUN = "/usr/bin/xcrun";
             TC_HOST_XCODEBUILD = "/usr/bin/xcodebuild";
             TC_HOST_DEVELOPER_DIR = "/Applications/Xcode.app/Contents/Developer";
+
+            # nixpkgs exports LD=ld for native builds. Xcode treats inherited
+            # environment variables as build settings, but its `Ld` phases
+            # require the clang driver because they pass driver-only options
+            # such as -Xlinker. Keep the Nix compiler wrappers on PATH while
+            # preventing Xcode (including an app launched from this shell)
+            # from invoking ld directly.
+            shellHook = ''
+              unset LD
+            '';
           };
         });
     };

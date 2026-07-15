@@ -1,0 +1,36 @@
+[package]
+name = "app-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen-swift"
+path = "uniffi-bindgen-swift.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+bluetooth = { path = "../../modules/bluetooth" }
+call-system = { path = "../../modules/call-system" }
+travel-core = { path = "../../crates/travel-core" }
+location = { path = "../../modules/location" }
+location-logic = { path = "../../crates/location-logic" }
+model = { path = "../../crates/model" }
+notifications = { path = "../../modules/notifications" }
+peer-transport = { path = "../../modules/peer-transport" }
+ranging = { path = "../../modules/ranging" }
+secure-storage = { path = "../../modules/secure-storage" }
+thiserror.workspace = true
+uniffi.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

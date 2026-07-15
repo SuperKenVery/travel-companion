@@ -7,20 +7,20 @@ options:
   groupSortPosition: top
 
 packages:
-  TcBluetoothApple:
-    path: modules/tc-bluetooth
-  TcPeerTransportApple:
-    path: modules/tc-peer-transport
-  TcLocationApple:
-    path: modules/tc-location
-  TcRangingApple:
-    path: modules/tc-ranging
-  TcNotificationsApple:
-    path: modules/tc-notifications
-  TcCallSystemApple:
-    path: modules/tc-call-system
-  TcSecureStorageApple:
-    path: modules/tc-secure-storage
+  BluetoothApple:
+    path: modules/bluetooth
+  PeerTransportApple:
+    path: modules/peer-transport
+  LocationApple:
+    path: modules/location
+  RangingApple:
+    path: modules/ranging
+  NotificationsApple:
+    path: modules/notifications
+  CallSystemApple:
+    path: modules/call-system
+  SecureStorageApple:
+    path: modules/secure-storage
 
 settings:
   base:
@@ -35,7 +35,7 @@ settings:
     SUPPORTED_PLATFORMS: iphoneos
     HEADER_SEARCH_PATHS:
       - "$(inherited)"
-      - "$(SRCROOT)/bindings/tc-app-ffi/generated"
+      - "$(SRCROOT)/bindings/app-ffi/generated"
 
 targets:
   TravelCompanion:
@@ -43,19 +43,19 @@ targets:
     platform: iOS
     sources:
       - path: app-ios/TravelCompanion
-      - path: bindings/tc-app-ffi/generated
+      - path: bindings/app-ffi/generated
         includes:
           - "*.swift"
     resources:
       - path: app-ios/TravelCompanion/Resources
     dependencies:
-      - package: TcBluetoothApple
-      - package: TcPeerTransportApple
-      - package: TcLocationApple
-      - package: TcRangingApple
-      - package: TcNotificationsApple
-      - package: TcCallSystemApple
-      - package: TcSecureStorageApple
+      - package: BluetoothApple
+      - package: PeerTransportApple
+      - package: LocationApple
+      - package: RangingApple
+      - package: NotificationsApple
+      - package: CallSystemApple
+      - package: SecureStorageApple
     preBuildScripts:
       - name: Build Rust Core
         script: '"$SRCROOT/scripts/build-rust-ios.sh" "$CONFIGURATION"'
@@ -72,13 +72,34 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: app-ios/TravelCompanion/Core/TravelCompanion-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - "$(inherited)"
-          - "$(SRCROOT)/bindings/tc-app-ffi/generated"
+          - "$(SRCROOT)/bindings/app-ffi/generated"
+        # Without `-scheme`, xcodebuild enters target mode. Local Swift package
+        # projects then use their own relative build roots (and may use their
+        # default Release configuration while the app defaults to Debug).
+        # Include both possible package product directories so target mode can
+        # consume the modules it has just built.
+        SWIFT_INCLUDE_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/modules/bluetooth/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/bluetooth/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/call-system/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/call-system/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/location/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/location/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/notifications/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/notifications/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/peer-transport/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/peer-transport/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/ranging/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/ranging/build/Release$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/secure-storage/build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)"
+          - "$(SRCROOT)/modules/secure-storage/build/Release$(EFFECTIVE_PLATFORM_NAME)"
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(SRCROOT)/build/ios/$(CONFIGURATION)"
         OTHER_LDFLAGS:
           - "$(inherited)"
-          - -ltc_app_ffi
+          - -lapp_ffi
           - -lsqlite3
           - -framework
           - Security

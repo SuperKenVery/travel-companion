@@ -2,8 +2,9 @@
 DerivedData/
 build/
 .build/
-/bindings/tc-app-ffi/generated
+/bindings/app-ffi/generated
 target/
 *.xcuserstate
 xcuserdata/
 TravelCompanion.xcodeproj/
+/.direnv

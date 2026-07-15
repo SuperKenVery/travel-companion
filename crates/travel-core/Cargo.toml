@@ -1,0 +1,33 @@
+[package]
+name = "travel-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rcgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+bluetooth = { path = "../../modules/bluetooth" }
+call = { path = "../call" }
+call-system = { path = "../../modules/call-system" }
+crypto = { path = "../crypto" }
+document = { path = "../document" }
+group-auth = { path = "../group-auth" }
+im = { path = "../im" }
+location = { path = "../../modules/location" }
+location-logic = { path = "../location-logic" }
+model = { path = "../model" }
+notifications = { path = "../../modules/notifications" }
+peer-transport = { path = "../../modules/peer-transport" }
+protocol = { path = "../protocol" }
+ranging = { path = "../../modules/ranging" }
+replication = { path = "../replication" }
+resources = { path = "../resources" }
+secure-storage = { path = "../../modules/secure-storage" }
+store = { path = "../store" }
+
+[dev-dependencies]
+tempfile.workspace = true

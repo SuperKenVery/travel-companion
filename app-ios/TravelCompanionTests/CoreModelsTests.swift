@@ -3,6 +3,16 @@ import XCTest
 @testable import TravelCompanion
 
 final class CoreModelsTests: XCTestCase {
+    func testFileSystemPathDecodesSpacesForNativeStorageAPIs() {
+        let url = URL(filePath: "/Library/Application Support/TravelCompanion/core.sqlite")
+
+        XCTAssertEqual(
+            TravelCore.fileSystemPath(for: url),
+            "/Library/Application Support/TravelCompanion/core.sqlite"
+        )
+        XCTAssertFalse(TravelCore.fileSystemPath(for: url).contains("%20"))
+    }
+
     func testCommandEncodingUsesStableTaggedShape() throws {
         let data = try JSONEncoder().encode(
             CoreCommand.respondPrecision(requestID: "request-1", accept: true)

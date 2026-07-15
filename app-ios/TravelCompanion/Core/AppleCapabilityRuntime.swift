@@ -1,11 +1,11 @@
 import Foundation
-import TcBluetoothApple
-import TcCallSystemApple
-import TcLocationApple
-import TcNotificationsApple
-import TcPeerTransportApple
-import TcRangingApple
-import TcSecureStorageApple
+import BluetoothApple
+import CallSystemApple
+import LocationApple
+import NotificationsApple
+import PeerTransportApple
+import RangingApple
+import SecureStorageApple
 
 /// Owns the Swift implementations passed to Rust as UniFFI foreign traits.
 ///
@@ -113,7 +113,7 @@ private final class BackendEventRelay<Sink: AnyObject & Sendable, Event: Sendabl
 }
 
 private extension BluetoothCapabilities {
-    init(_ snapshot: TcBluetoothCapabilitySnapshot) {
+    init(_ snapshot: BluetoothCapabilitySnapshot) {
         self.init(
             central: snapshot.central,
             peripheral: snapshot.peripheral,
@@ -125,7 +125,7 @@ private extension BluetoothCapabilities {
 }
 
 private extension TransportCapabilities {
-    init(_ snapshot: TcPeerTransportCapabilitySnapshot) {
+    init(_ snapshot: PeerTransportCapabilitySnapshot) {
         self.init(
             localOnly: snapshot.localOnly,
             peerToPeer: snapshot.peerToPeer,
@@ -138,7 +138,7 @@ private extension TransportCapabilities {
 }
 
 private extension LocationCapabilities {
-    init(_ snapshot: TcLocationCapabilitySnapshot) {
+    init(_ snapshot: LocationCapabilitySnapshot) {
         self.init(
             preciseLocation: snapshot.preciseLocation,
             backgroundUpdates: snapshot.backgroundUpdates,
@@ -149,7 +149,7 @@ private extension LocationCapabilities {
 }
 
 private extension RangingCapabilities {
-    init(_ snapshot: TcRangingCapabilitySnapshot) {
+    init(_ snapshot: RangingCapabilitySnapshot) {
         self.init(
             distance: snapshot.distance,
             direction: snapshot.direction,
@@ -160,7 +160,7 @@ private extension RangingCapabilities {
 }
 
 private extension NotificationCapabilities {
-    init(_ snapshot: TcNotificationsCapabilitySnapshot) {
+    init(_ snapshot: NotificationsCapabilitySnapshot) {
         self.init(
             localNotifications: snapshot.localNotifications,
             actions: snapshot.actions,
@@ -170,7 +170,7 @@ private extension NotificationCapabilities {
 }
 
 private extension CallSystemCapabilities {
-    init(_ snapshot: TcCallSystemCapabilitySnapshot) {
+    init(_ snapshot: CallSystemCapabilitySnapshot) {
         self.init(
             incomingCallUi: snapshot.incomingCallUI,
             backgroundAudio: snapshot.backgroundAudio,
@@ -181,7 +181,7 @@ private extension CallSystemCapabilities {
 }
 
 private extension SecureStorageCapabilities {
-    init(_ snapshot: TcSecureStorageCapabilitySnapshot) {
+    init(_ snapshot: SecureStorageCapabilitySnapshot) {
         self.init(
             hardwareBackedWhenAvailable: snapshot.hardwareBackedWhenAvailable,
             deviceOnlyAccessibility: snapshot.deviceOnlyAccessibility,
@@ -190,7 +190,7 @@ private extension SecureStorageCapabilities {
     }
 }
 
-private extension TcPeerTransportChannel {
+private extension PeerTransportChannel {
     init(_ channel: TransportChannel) {
         switch channel {
         case .control: self = .control
@@ -202,7 +202,7 @@ private extension TcPeerTransportChannel {
 }
 
 private extension TransportChannel {
-    init(_ channel: TcPeerTransportChannel) {
+    init(_ channel: PeerTransportChannel) {
         switch channel {
         case .control: self = .control
         case .event: self = .event
@@ -213,7 +213,7 @@ private extension TransportChannel {
 }
 
 private extension TransportConnectionSource {
-    init(_ source: TcPeerTransportConnectionSource) {
+    init(_ source: PeerTransportConnectionSource) {
         switch source {
         case .inbound: self = .inbound
         case .outbound: self = .outbound
@@ -222,7 +222,7 @@ private extension TransportConnectionSource {
 }
 
 private extension LocationAuthorization {
-    init(_ authorization: TcLocationAuthorization) {
+    init(_ authorization: LocationApple.LocationAuthorization) {
         switch authorization {
         case .notDetermined: self = .notDetermined
         case .denied: self = .denied
@@ -233,7 +233,7 @@ private extension LocationAuthorization {
 }
 
 private extension LocationSampleRecord {
-    init(_ sample: TcLocationSample) {
+    init(_ sample: LocationApple.LocationSample) {
         self.init(
             latitude: sample.latitude,
             longitude: sample.longitude,
@@ -247,7 +247,7 @@ private extension LocationSampleRecord {
 }
 
 private extension NotificationAuthorization {
-    init(_ authorization: TcNotificationAuthorization) {
+    init(_ authorization: NotificationsApple.NotificationAuthorization) {
         switch authorization {
         case .notDetermined: self = .notDetermined
         case .denied: self = .denied
@@ -257,7 +257,7 @@ private extension NotificationAuthorization {
     }
 }
 
-private extension TcCallSystemAudioRoute {
+private extension CallSystemAudioRoute {
     init(_ route: AudioRoute) {
         switch route {
         case .receiver: self = .receiver
@@ -269,7 +269,7 @@ private extension TcCallSystemAudioRoute {
 }
 
 private extension AudioRoute {
-    init(_ route: TcCallSystemAudioRoute) {
+    init(_ route: CallSystemAudioRoute) {
         switch route {
         case .receiver: self = .receiver
         case .speaker: self = .speaker
@@ -279,7 +279,7 @@ private extension AudioRoute {
     }
 }
 
-private func deliverBluetoothEvent(_ event: TcBluetoothEvent, to sink: BluetoothEventSink) {
+private func deliverBluetoothEvent(_ event: BluetoothEvent, to sink: BluetoothEventSink) {
     switch event {
     case let .started(requestID):
         sink.started(requestId: requestID)
@@ -301,7 +301,7 @@ private func deliverBluetoothEvent(_ event: TcBluetoothEvent, to sink: Bluetooth
 }
 
 private func deliverPeerTransportEvent(
-    _ event: TcPeerTransportEvent,
+    _ event: PeerTransportEvent,
     to sink: PeerTransportEventSink
 ) {
     switch event {
@@ -332,7 +332,7 @@ private func deliverPeerTransportEvent(
     }
 }
 
-private func deliverLocationEvent(_ event: TcLocationEvent, to sink: LocationEventSink) {
+private func deliverLocationEvent(_ event: LocationEvent, to sink: LocationEventSink) {
     switch event {
     case let .started(requestID):
         sink.started(requestId: requestID)
@@ -356,7 +356,7 @@ private func deliverLocationEvent(_ event: TcLocationEvent, to sink: LocationEve
     }
 }
 
-private func deliverRangingEvent(_ event: TcRangingEvent, to sink: RangingEventSink) {
+private func deliverRangingEvent(_ event: RangingEvent, to sink: RangingEventSink) {
     switch event {
     case let .discoveryToken(requestID, token):
         sink.discoveryToken(requestId: requestID, token: token)
@@ -379,7 +379,7 @@ private func deliverRangingEvent(_ event: TcRangingEvent, to sink: RangingEventS
 }
 
 private func deliverNotificationEvent(
-    _ event: TcNotificationsEvent,
+    _ event: NotificationsEvent,
     to sink: NotificationsEventSink
 ) {
     switch event {
@@ -396,7 +396,7 @@ private func deliverNotificationEvent(
     }
 }
 
-private func deliverCallSystemEvent(_ event: TcCallSystemEvent, to sink: CallSystemEventSink) {
+private func deliverCallSystemEvent(_ event: CallSystemEvent, to sink: CallSystemEventSink) {
     switch event {
     case let .incomingReported(requestID, callID):
         sink.incomingReported(requestId: requestID, callId: callID)
@@ -433,7 +433,7 @@ private func deliverCallSystemEvent(_ event: TcCallSystemEvent, to sink: CallSys
 }
 
 private func deliverSecureStorageEvent(
-    _ event: TcSecureStorageEvent,
+    _ event: SecureStorageEvent,
     to sink: SecureStorageEventSink
 ) {
     switch event {
@@ -450,20 +450,20 @@ private func deliverSecureStorageEvent(
 
 private final class AppleBluetoothBackend: BluetoothBackend, @unchecked Sendable {
     private let capabilitySnapshot = BluetoothCapabilities(
-        TcBluetoothAppleBackend.capabilitySnapshot
+        BluetoothAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<BluetoothEventSink, TcBluetoothEvent>
-    private let backend: TcBluetoothAppleBackend
+    private let relay: BackendEventRelay<BluetoothEventSink, BluetoothEvent>
+    private let backend: BluetoothAppleBackend
 
     @MainActor
     init() {
-        let relay = BackendEventRelay<BluetoothEventSink, TcBluetoothEvent>(
+        let relay = BackendEventRelay<BluetoothEventSink, BluetoothEvent>(
             label: "com.travelcompanion.uniffi.bluetooth-events",
             deliver: { sink, event in deliverBluetoothEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcBluetoothAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = BluetoothAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> BluetoothCapabilities { capabilitySnapshot }
@@ -512,19 +512,19 @@ private final class AppleBluetoothBackend: BluetoothBackend, @unchecked Sendable
 
 private final class ApplePeerTransportBackend: PeerTransportBackend, @unchecked Sendable {
     private let capabilitySnapshot = TransportCapabilities(
-        TcPeerTransportAppleBackend.capabilitySnapshot
+        PeerTransportAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<PeerTransportEventSink, TcPeerTransportEvent>
-    private let backend: TcPeerTransportAppleBackend
+    private let relay: BackendEventRelay<PeerTransportEventSink, PeerTransportEvent>
+    private let backend: PeerTransportAppleBackend
 
     init() {
-        let relay = BackendEventRelay<PeerTransportEventSink, TcPeerTransportEvent>(
+        let relay = BackendEventRelay<PeerTransportEventSink, PeerTransportEvent>(
             label: "com.travelcompanion.uniffi.peer-transport-events",
             deliver: { sink, event in deliverPeerTransportEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcPeerTransportAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = PeerTransportAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> TransportCapabilities { capabilitySnapshot }
@@ -579,7 +579,7 @@ private final class ApplePeerTransportBackend: PeerTransportBackend, @unchecked 
             await backend.sendFrame(
                 requestID: requestId,
                 connection: connection,
-                channel: TcPeerTransportChannel(channel),
+                channel: PeerTransportChannel(channel),
                 bytes: [UInt8](bytes)
             )
         }
@@ -599,20 +599,20 @@ private final class ApplePeerTransportBackend: PeerTransportBackend, @unchecked 
 
 private final class AppleLocationBackend: LocationBackend, @unchecked Sendable {
     private let capabilitySnapshot = LocationCapabilities(
-        TcLocationAppleBackend.capabilitySnapshot
+        LocationAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<LocationEventSink, TcLocationEvent>
-    private let backend: TcLocationAppleBackend
+    private let relay: BackendEventRelay<LocationEventSink, LocationEvent>
+    private let backend: LocationAppleBackend
 
     @MainActor
     init() {
-        let relay = BackendEventRelay<LocationEventSink, TcLocationEvent>(
+        let relay = BackendEventRelay<LocationEventSink, LocationEvent>(
             label: "com.travelcompanion.uniffi.location-events",
             deliver: { sink, event in deliverLocationEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcLocationAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = LocationAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> LocationCapabilities { capabilitySnapshot }
@@ -649,20 +649,20 @@ private final class AppleLocationBackend: LocationBackend, @unchecked Sendable {
 
 private final class AppleRangingBackend: RangingBackend, @unchecked Sendable {
     private let capabilitySnapshot = RangingCapabilities(
-        TcRangingAppleBackend.capabilitySnapshot
+        RangingAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<RangingEventSink, TcRangingEvent>
-    private let backend: TcRangingAppleBackend
+    private let relay: BackendEventRelay<RangingEventSink, RangingEvent>
+    private let backend: RangingAppleBackend
 
     @MainActor
     init() {
-        let relay = BackendEventRelay<RangingEventSink, TcRangingEvent>(
+        let relay = BackendEventRelay<RangingEventSink, RangingEvent>(
             label: "com.travelcompanion.uniffi.ranging-events",
             deliver: { sink, event in deliverRangingEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcRangingAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = RangingAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> RangingCapabilities { capabilitySnapshot }
@@ -699,20 +699,20 @@ private final class AppleRangingBackend: RangingBackend, @unchecked Sendable {
 
 private final class AppleNotificationsBackend: NotificationsBackend, @unchecked Sendable {
     private let capabilitySnapshot = NotificationCapabilities(
-        TcNotificationsAppleBackend.capabilitySnapshot
+        NotificationsAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<NotificationsEventSink, TcNotificationsEvent>
-    private let backend: TcNotificationsAppleBackend
+    private let relay: BackendEventRelay<NotificationsEventSink, NotificationsEvent>
+    private let backend: NotificationsAppleBackend
 
     @MainActor
     init() {
-        let relay = BackendEventRelay<NotificationsEventSink, TcNotificationsEvent>(
+        let relay = BackendEventRelay<NotificationsEventSink, NotificationsEvent>(
             label: "com.travelcompanion.uniffi.notifications-events",
             deliver: { sink, event in deliverNotificationEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcNotificationsAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = NotificationsAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> NotificationCapabilities { capabilitySnapshot }
@@ -766,20 +766,20 @@ private final class AppleNotificationsBackend: NotificationsBackend, @unchecked 
 
 private final class AppleCallSystemBackend: CallSystemBackend, @unchecked Sendable {
     private let capabilitySnapshot = CallSystemCapabilities(
-        TcCallSystemAppleBackend.capabilitySnapshot
+        CallSystemAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<CallSystemEventSink, TcCallSystemEvent>
-    private let backend: TcCallSystemAppleBackend
+    private let relay: BackendEventRelay<CallSystemEventSink, CallSystemEvent>
+    private let backend: CallSystemAppleBackend
 
     @MainActor
     init() {
-        let relay = BackendEventRelay<CallSystemEventSink, TcCallSystemEvent>(
+        let relay = BackendEventRelay<CallSystemEventSink, CallSystemEvent>(
             label: "com.travelcompanion.uniffi.call-system-events",
             deliver: { sink, event in deliverCallSystemEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcCallSystemAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = CallSystemAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> CallSystemCapabilities { capabilitySnapshot }
@@ -828,7 +828,7 @@ private final class AppleCallSystemBackend: CallSystemBackend, @unchecked Sendab
 
     func setRoute(requestId: String, route: AudioRoute) {
         commands.enqueue { [backend] in
-            await backend.setRoute(requestID: requestId, route: TcCallSystemAudioRoute(route))
+            await backend.setRoute(requestID: requestId, route: CallSystemAudioRoute(route))
         }
     }
 
@@ -868,19 +868,19 @@ private final class AppleCallSystemBackend: CallSystemBackend, @unchecked Sendab
 
 private final class AppleSecureStorageBackend: SecureStorageBackend, @unchecked Sendable {
     private let capabilitySnapshot = SecureStorageCapabilities(
-        TcSecureStorageAppleBackend.capabilitySnapshot
+        SecureStorageAppleBackend.capabilitySnapshot
     )
     private let commands = OrderedAsyncQueue()
-    private let relay: BackendEventRelay<SecureStorageEventSink, TcSecureStorageEvent>
-    private let backend: TcSecureStorageAppleBackend
+    private let relay: BackendEventRelay<SecureStorageEventSink, SecureStorageEvent>
+    private let backend: SecureStorageAppleBackend
 
     init() {
-        let relay = BackendEventRelay<SecureStorageEventSink, TcSecureStorageEvent>(
+        let relay = BackendEventRelay<SecureStorageEventSink, SecureStorageEvent>(
             label: "com.travelcompanion.uniffi.secure-storage-events",
             deliver: { sink, event in deliverSecureStorageEvent(event, to: sink) }
         )
         self.relay = relay
-        backend = TcSecureStorageAppleBackend { [weak relay] in relay?.emit($0) }
+        backend = SecureStorageAppleBackend { [weak relay] in relay?.emit($0) }
     }
 
     func capabilities() -> SecureStorageCapabilities { capabilitySnapshot }
